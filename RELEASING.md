@@ -4,6 +4,8 @@
 
 1. Move the `Unreleased` entries in [`CHANGELOG.md`](CHANGELOG.md) under a new
    version heading, and add the comparison links at the bottom of that file.
+   Update the sample `hl7probe --version` output in the README's Install
+   section too: it is the one version number written down by hand.
 2. Bump `version` in `Cargo.toml`, run `cargo test`, and commit.
 3. Tag and push:
 

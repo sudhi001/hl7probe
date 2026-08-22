@@ -96,9 +96,13 @@ cargo install hl7probe
 
 Check it works:
 
-```sh
-hl7probe --version
+```console
+$ hl7probe --version
+hl7probe 0.3.0
 ```
+
+None of the commands above pin a version: they each fetch the current release,
+which the badges at the top of this page track.
 
 ## Quick start
 
