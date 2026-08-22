@@ -13,18 +13,18 @@ pub enum Severity {
 }
 
 impl Severity {
-    pub fn glyph(self) -> &'static str {
+    pub const fn glyph(self) -> &'static str {
         match self {
-            Severity::Error => "\u{2717}",   // ✗
-            Severity::Warning => "\u{26a0}", // ⚠
-            Severity::Info => "\u{2139}",    // ℹ
+            Self::Error => "\u{2717}",   // ✗
+            Self::Warning => "\u{26a0}", // ⚠
+            Self::Info => "\u{2139}",    // ℹ
         }
     }
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-            Severity::Info => "info",
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
         }
     }
 }
@@ -39,21 +39,21 @@ pub enum Category {
 }
 
 impl Category {
-    pub fn title(self) -> &'static str {
+    pub const fn title(self) -> &'static str {
         match self {
-            Category::Structure => "Structure",
-            Category::Required => "Required fields",
-            Category::DataType => "Data types",
-            Category::CodeTable => "Code tables",
-            Category::Consistency => "Consistency",
+            Self::Structure => "Structure",
+            Self::Required => "Required fields",
+            Self::DataType => "Data types",
+            Self::CodeTable => "Code tables",
+            Self::Consistency => "Consistency",
         }
     }
-    pub const ALL: [Category; 5] = [
-        Category::Structure,
-        Category::Required,
-        Category::DataType,
-        Category::CodeTable,
-        Category::Consistency,
+    pub const ALL: [Self; 5] = [
+        Self::Structure,
+        Self::Required,
+        Self::DataType,
+        Self::CodeTable,
+        Self::Consistency,
     ];
 }
 
@@ -77,8 +77,8 @@ impl Finding {
         location: impl Into<String>,
         summary: impl Into<String>,
         detail: impl Into<String>,
-    ) -> Finding {
-        Finding {
+    ) -> Self {
+        Self {
             severity,
             category,
             location: location.into(),
@@ -88,7 +88,7 @@ impl Finding {
             detail: detail.into(),
         }
     }
-    fn at(mut self, seg: &Segment, index: usize) -> Finding {
+    const fn at(mut self, seg: &Segment, index: usize) -> Self {
         self.line = seg.line;
         self.segment_index = Some(index);
         self
@@ -265,7 +265,7 @@ fn check_structure(
             Severity::Warning,
             Category::Structure,
             "MSH-9.1",
-            format!("unknown message code {:?}", code),
+            format!("unknown message code {code:?}"),
             "not listed in HL7 table 0076 (Message Type)",
         ));
     }
@@ -276,7 +276,7 @@ fn check_structure(
                 Severity::Info,
                 Category::Structure,
                 "MSH-9",
-                format!("no structure definition for {}^{}", code, trigger),
+                format!("no structure definition for {code}^{trigger}"),
                 "segment order and required segments were not checked; field-level checks still ran",
             ));
         }
@@ -285,17 +285,14 @@ fn check_structure(
 
     // MSH-9.3 should name the abstract structure, e.g. ADT_A01.
     if !structure_id.is_empty() {
-        let expected = format!("{}_{}", code, trigger);
+        let expected = format!("{code}_{trigger}");
         if !trigger.is_empty() && structure_id != expected && !structure_id.starts_with(code) {
             out.push(Finding::new(
                 Severity::Warning,
                 Category::Structure,
                 "MSH-9.3",
-                format!(
-                    "structure {:?} does not match {}^{}",
-                    structure_id, code, trigger
-                ),
-                format!("expected {:?}", expected),
+                format!("structure {structure_id:?} does not match {code}^{trigger}"),
+                format!("expected {expected:?}"),
             ));
         }
     }
@@ -484,7 +481,9 @@ fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
             continue;
         }
 
-        let field = seg.field(fs.seq).unwrap();
+        let Some(field) = seg.field(fs.seq) else {
+            continue;
+        };
         if field.is_null() {
             continue; // "" is an explicit "delete this value" instruction.
         }
@@ -564,7 +563,7 @@ fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
 #[allow(clippy::collapsible_match)]
 fn check_datatype(
     fs: &spec::FieldSpec,
-    rep: &crate::parser::Repetition,
+    rep: &Repetition,
     loc: &str,
     seg: &Segment,
     index: usize,
@@ -605,7 +604,7 @@ fn check_datatype(
             if c1.parse::<f64>().is_err() {
                 bad(
                     "not numeric".to_string(),
-                    format!("{:?} cannot be read as a number", c1),
+                    format!("{c1:?} cannot be read as a number"),
                 );
             }
         }
@@ -613,7 +612,7 @@ fn check_datatype(
             Ok(_) => {}
             Err(_) => bad(
                 "not a valid sequence ID".to_string(),
-                format!("{:?} is not a non-negative integer", c1),
+                format!("{c1:?} is not a non-negative integer"),
             ),
         },
         "CX" => {
@@ -669,7 +668,7 @@ fn check_datatype(
             }
         }
         "PL" => {
-            let point_of_care = c1.clone();
+            let point_of_care = c1;
             let filled = rep.filled_comps();
             if point_of_care.is_empty() && filled > 0 {
                 bad(
@@ -708,7 +707,7 @@ fn check_datatype(
             if !spec::is_known_version(&c1) {
                 bad(
                     "not a known HL7 version".to_string(),
-                    format!("{:?} is not listed in HL7 table 0104", c1),
+                    format!("{c1:?} is not listed in HL7 table 0104"),
                 );
             }
         }
@@ -720,10 +719,7 @@ fn check_datatype(
                         Category::CodeTable,
                         loc.to_string(),
                         "no coding system",
-                        format!(
-                            "code {:?} is sent without component 3 (name of coding system)",
-                            c1
-                        ),
+                        format!("code {c1:?} is sent without component 3 (name of coding system)"),
                     )
                     .at(seg, index),
                 );
@@ -773,8 +769,8 @@ fn check_table(
             severity,
             Category::CodeTable,
             loc.to_string(),
-            format!("unrecognised code {:?}", value),
-            format!("{}: {}", field_name, hint),
+            format!("unrecognised code {value:?}"),
+            format!("{field_name}: {hint}"),
         )
         .at(seg, index),
     );
@@ -870,10 +866,7 @@ impl Rule for EventRule {
                         Severity::Warning,
                         Category::Consistency,
                         "EVN-1",
-                        format!(
-                            "event type {:?} does not match MSH-9 trigger {:?}",
-                            evn_type, trigger
-                        ),
+                        format!("event type {evn_type:?} does not match MSH-9 trigger {trigger:?}"),
                         "the event type code should repeat the trigger event from MSH-9.2",
                     )
                     .at(evn, i),
@@ -951,10 +944,7 @@ impl Rule for PatientRule {
                         Category::Consistency,
                         "PID-30",
                         "death date is present but the death indicator is not Y",
-                        format!(
-                            "PID-29 is {:?} while PID-30 is {:?}",
-                            death_date, death_flag
-                        ),
+                        format!("PID-29 is {death_date:?} while PID-30 is {death_flag:?}"),
                     )
                     .at(pid, i),
                 );
@@ -1113,8 +1103,8 @@ impl Rule for ObservationRule {
                         Severity::Error,
                         Category::Consistency,
                         "OBX-5",
-                        format!("value does not match declared type {}", vt),
-                        format!("{:?}: {}", first, reason),
+                        format!("value does not match declared type {vt}"),
+                        format!("{first:?}: {reason}"),
                     )
                     .at(obx, i),
                 );
@@ -1163,7 +1153,7 @@ fn check_set_ids(msg: &Message, out: &mut Vec<Finding>) {
                     Finding::new(
                         Severity::Warning,
                         Category::Consistency,
-                        format!("{}-1", name),
+                        format!("{name}-1"),
                         "set ID is out of sequence",
                         format!("occurrence {} carries set ID {}", n + 1, value),
                     )
@@ -1178,20 +1168,21 @@ fn check_set_ids(msg: &Message, out: &mut Vec<Finding>) {
 /// Numeric field position inside a location like `PID-11` or `OBX-5[2]`, used
 /// only for ordering findings.
 fn field_seq(location: &str) -> usize {
-    location
-        .split_once('-')
-        .map(|(_, rest)| {
-            rest.chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0)
+    location.split_once('-').map_or(0, |(_, rest)| {
+        rest.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
     use super::*;
     use crate::parser::parse_str;
 
@@ -1287,7 +1278,7 @@ PID|1||123456^^^MERCY^MR||Smith^John||19850312|M|||1 Oak St^^Springfield^IL^6270
             .iter()
             .filter(|f| f.severity == Severity::Error)
             .collect();
-        assert!(blocking.is_empty(), "unexpected errors: {:#?}", blocking);
+        assert!(blocking.is_empty(), "unexpected errors: {blocking:#?}");
     }
 
     #[test]
@@ -1331,7 +1322,7 @@ PID|1||123456^^^MERCY^MR||Smith^John||19850312|M|||1 Oak St^^Springfield^IL^6270
 
     #[test]
     fn future_birth_date_is_rejected() {
-        let (y, _, _) = crate::datetime::today();
+        let (y, _, _) = datetime::today();
         let text = format!(
             "{HEADER}EVN|A01|20240115143200\rPID|1||1^^^A^MR||Smith^John||{}0312|M|||1 St^^X^IL^1\rPV1|1|I|ER^101\r",
             y + 2

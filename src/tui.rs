@@ -56,10 +56,10 @@ struct App {
 }
 
 impl App {
-    fn new(items: Vec<(String, Message, Report)>) -> App {
+    fn new(items: Vec<(String, Message, Report)>) -> Self {
         let mut segments = ListState::default();
         segments.select(Some(0));
-        App {
+        Self {
             items,
             current: 0,
             segments,
@@ -91,8 +91,17 @@ impl App {
     }
 
     fn move_message(&mut self, delta: isize) {
-        let len = self.items.len() as isize;
-        let next = (self.current as isize + delta).rem_euclid(len) as usize;
+        // Wrap around the list without signed index arithmetic: reducing
+        // `delta` modulo the length first keeps the addition non-negative.
+        let len = self.items.len();
+        if len == 0 {
+            return;
+        }
+        let Ok(len_signed) = isize::try_from(len) else {
+            return;
+        };
+        let step = usize::try_from(delta.rem_euclid(len_signed)).unwrap_or(0);
+        let next = (self.current + step) % len;
         if next != self.current {
             self.current = next;
             self.segments.select(Some(0));
@@ -115,8 +124,12 @@ impl App {
         if len == 0 {
             return;
         }
-        let current = state.selected().unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, len as isize - 1) as usize;
+        let current = state.selected().unwrap_or(0);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta.unsigned_abs()).min(len - 1)
+        };
         state.select(Some(next));
         if self.focus == Focus::Segments {
             self.fields.select(None);
@@ -245,7 +258,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
-fn draw(frame: &mut Frame, app: &mut App) {
+fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -272,19 +285,19 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let msg = app.msg();
     let report = app.report();
     let sep = &msg.sep;
     let version = msg.version();
-    let desc = report.structure.map(|s| s.desc).unwrap_or("");
+    let desc = report.structure.map_or("", |s| s.desc);
 
     let mut spans = vec![
         Span::styled(
             if version.is_empty() {
                 "HL7".to_string()
             } else {
-                format!("HL7 v{}", version)
+                format!("HL7 v{version}")
             },
             Style::default().add_modifier(Modifier::BOLD),
         ),
@@ -309,7 +322,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let sending = msg.msh().comp(3, 1, sep);
     let receiving = msg.msh().comp(5, 1, sep);
     if !sending.is_empty() || !receiving.is_empty() {
-        meta.push(format!("{} \u{2192} {}", sending, receiving));
+        meta.push(format!("{sending} \u{2192} {receiving}"));
     }
 
     let mut lines = vec![
@@ -353,7 +366,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(colour))
         .title(Span::styled(
-            format!(" {} ", title),
+            format!(" {title} "),
             Style::default().fg(colour).add_modifier(if focused {
                 Modifier::BOLD
             } else {
@@ -362,10 +375,10 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         ))
 }
 
-fn draw_segments(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_segments(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let msg = &app.items[app.current].1;
     let report = &app.items[app.current].2;
-    let items: Vec<ListItem> = msg
+    let items: Vec<ListItem<'_>> = msg
         .segments
         .iter()
         .enumerate()
@@ -404,7 +417,7 @@ fn draw_segments(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.segments);
 }
 
-fn draw_fields(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_fields(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let seg_index = app.seg_index();
     let rows = app.rows();
     let seg = &app.items[app.current].1.segments[seg_index];
@@ -418,7 +431,7 @@ fn draw_fields(frame: &mut Frame, app: &mut App, area: Rect) {
         .saturating_sub(label_width + 14)
         .max(12);
 
-    let items: Vec<ListItem> = rows
+    let items: Vec<ListItem<'_>> = rows
         .iter()
         .map(|row| field_item(row, label_width, value_width))
         .collect();
@@ -441,7 +454,7 @@ fn draw_fields(frame: &mut Frame, app: &mut App, area: Rect) {
 fn field_item(row: &FieldRow, label_width: usize, value_width: usize) -> ListItem<'static> {
     let label = match row.repetition {
         None => row.label.clone(),
-        Some(n) => format!("  ~ rep {}", n),
+        Some(n) => format!("  ~ rep {n}"),
     };
     let mut spans = vec![
         Span::styled(
@@ -471,21 +484,21 @@ fn field_item(row: &FieldRow, label_width: usize, value_width: usize) -> ListIte
         let text = if note.is_empty() {
             "(empty)".to_string()
         } else {
-            format!("(empty)  {}", note)
+            format!("(empty)  {note}")
         };
         spans.push(Span::styled(text, Style::default().fg(MUTED)));
     }
     ListItem::new(Line::from(spans))
 }
 
-fn render_glyph_or_space(sev: Option<Severity>) -> &'static str {
+const fn render_glyph_or_space(sev: Option<Severity>) -> &'static str {
     match sev {
         Some(s) => s.glyph(),
         None => " ",
     }
 }
 
-fn draw_findings(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_findings(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let findings = app.visible_findings();
     let scope = if app.all_findings {
         "all segments"
@@ -498,7 +511,7 @@ fn draw_findings(frame: &mut Frame, app: &mut App, area: Rect) {
         app.report().errors(),
         app.report().warnings()
     );
-    let items: Vec<ListItem> = if findings.is_empty() {
+    let items: Vec<ListItem<'_>> = if findings.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             format!(" {} nothing to report", render::OK),
             Style::default().fg(Color::Green),
@@ -533,7 +546,7 @@ fn draw_findings(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.findings);
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let toggles = format!(
         "empty:{}  notes:{}  raw:{}  scope:{}",
         on_off(app.show_empty),
@@ -547,14 +560,14 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         "\u{2191}\u{2193} move  tab pane  a empty  v notes  r raw  f scope  ? help  q quit"
     };
     let line = Line::from(vec![
-        Span::styled(format!(" {}", keys), Style::default().fg(MUTED)),
+        Span::styled(format!(" {keys}"), Style::default().fg(MUTED)),
         Span::raw("   "),
         Span::styled(toggles, Style::default().fg(ACCENT)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn on_off(v: bool) -> &'static str {
+const fn on_off(v: bool) -> &'static str {
     if v {
         "on"
     } else {
@@ -562,7 +575,7 @@ fn on_off(v: bool) -> &'static str {
     }
 }
 
-fn draw_help(frame: &mut Frame) {
+fn draw_help(frame: &mut Frame<'_>) {
     let area = centered(62, 17, frame.area());
     let text = vec![
         Line::from(Span::styled(
@@ -617,10 +630,16 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
+
     use super::*;
     use crate::parser::parse_str;
     use crate::validate::validate;
     use ratatui::backend::TestBackend;
+    use std::fmt::Write as _;
 
     const MSG: &str = "MSH|^~\\&|HIS|MERCY|LIS|LAB|20240115143200||ADT^A01^ADT_A01|MSG1|P|2.5.1\r\
 EVN|A01|20240115143200||||20240115143000\r\
@@ -633,6 +652,53 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
         App::new(vec![("test.hl7".to_string(), msg, report)])
     }
 
+    /// A second message, so the wrap-around in `move_message` has somewhere to go.
+    fn two_message_app() -> App {
+        let items = ["MSG1", "MSG2"]
+            .iter()
+            .map(|id| {
+                let msg = parse_str(&MSG.replace("MSG1", id));
+                let report = validate(&msg);
+                ((*id).to_string(), msg, report)
+            })
+            .collect();
+        App::new(items)
+    }
+
+    #[test]
+    fn message_navigation_wraps_in_both_directions() {
+        let mut batch = two_message_app();
+        assert_eq!(batch.current, 0);
+        batch.move_message(1);
+        assert_eq!(batch.current, 1);
+        batch.move_message(1); // past the end, back to the first
+        assert_eq!(batch.current, 0);
+        batch.move_message(-1); // before the start, on to the last
+        assert_eq!(batch.current, 1);
+
+        // A single message has nowhere to go, and must not divide by zero.
+        let mut lone = app();
+        lone.move_message(1);
+        lone.move_message(-1);
+        assert_eq!(lone.current, 0);
+    }
+
+    #[test]
+    fn list_navigation_saturates_at_both_ends() {
+        let mut app = app();
+        let last = app.items[0].1.segments.len() - 1;
+        app.step(-1); // already at the top
+        assert_eq!(app.segments.selected(), Some(0));
+        app.step(9999); // End
+        assert_eq!(app.segments.selected(), Some(last));
+        app.step(10); // PageDown past the end
+        assert_eq!(app.segments.selected(), Some(last));
+        app.step(-9999); // Home
+        assert_eq!(app.segments.selected(), Some(0));
+        app.step(-10); // PageUp past the start
+        assert_eq!(app.segments.selected(), Some(0));
+    }
+
     fn screen(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
@@ -641,10 +707,10 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
             .buffer()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<Vec<_>>()
             .chunks(120)
-            .map(|row| row.concat())
+            .map(<[&str]>::concat)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -694,7 +760,7 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
                 if cell.modifier.contains(Modifier::BOLD) {
                     codes.push("1".into());
                 }
-                out.push_str(&format!("\u{1b}[0;{}m{}", codes.join(";"), cell.symbol()));
+                let _ = write!(out, "\u{1b}[0;{}m{}", codes.join(";"), cell.symbol());
             }
             out.push_str("\u{1b}[0m\n");
         }
@@ -708,7 +774,7 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
             Color::Yellow => "33".into(),
             Color::Cyan => "36".into(),
             Color::DarkGray => "90".into(),
-            Color::Rgb(r, g, b) => format!("38;2;{};{};{}", r, g, b),
+            Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
             _ => return None,
         })
     }

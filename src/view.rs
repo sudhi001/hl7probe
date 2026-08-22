@@ -5,6 +5,8 @@
 //! from re-deriving the same rows in two different ways; each of them only
 //! decides how a row is painted.
 
+use std::fmt::Write as _;
+
 use crate::datetime;
 use crate::parser::{unescape, Message, Repetition, Separators};
 use crate::spec::{self, Use};
@@ -30,7 +32,7 @@ pub struct FieldRow {
 
 impl FieldRow {
     /// Why an empty field is being shown at all.
-    pub fn empty_note(&self) -> &'static str {
+    pub const fn empty_note(&self) -> &'static str {
         match self.usage {
             Some(Use::Required) => "required",
             Some(Use::Recommended) => "recommended",
@@ -62,14 +64,14 @@ pub fn segment_rows(
     for seq in field_positions(&seg.name, seg.last_populated()) {
         let field_spec = spec::field_spec(&seg.name, seq);
         let usage = field_spec.map(|f| f.usage);
-        let expected = matches!(usage, Some(Use::Required) | Some(Use::Recommended));
+        let expected = matches!(usage, Some(Use::Required | Use::Recommended));
         let present = seg.has(seq);
         if !present && !options.show_empty && !expected {
             continue;
         }
 
         let location = format!("{}-{}", seg.name, seq);
-        let repetition_prefix = format!("{}[", location);
+        let repetition_prefix = format!("{location}[");
         let severity = findings
             .iter()
             .filter(|f| f.location == location || f.location.starts_with(&repetition_prefix))
@@ -145,7 +147,7 @@ pub fn humanize(
                 let (y, m, d) = datetime::today();
                 let age = ts.years_until(y, m, d);
                 if (0..=130).contains(&age) {
-                    s.push_str(&format!(", age {}", age));
+                    let _ = write!(s, ", age {age}");
                 }
             }
             s
@@ -170,9 +172,9 @@ pub fn humanize(
             let name = person_name(&c(2), &c(3), &c(4), &c(5), &c(6));
             match (name.is_empty(), c1.is_empty()) {
                 (true, true) => return None,
-                (true, false) => format!("ID {}", c1),
+                (true, false) => format!("ID {c1}"),
                 (false, true) => name,
-                (false, false) => format!("{} (ID {})", name, c1),
+                (false, false) => format!("{name} (ID {c1})"),
             }
         }
         "CX" => {
@@ -187,7 +189,7 @@ pub fn humanize(
                 extra.push(authority);
             }
             if !extra.is_empty() {
-                s.push_str(&format!(" ({})", extra.join(", ")));
+                let _ = write!(s, " ({})", extra.join(", "));
             }
             s
         }
@@ -212,10 +214,10 @@ pub fn humanize(
             let mut s = if text.is_empty() {
                 c1.clone()
             } else {
-                format!("{} ({})", text, c1)
+                format!("{text} ({c1})")
             };
             if !system.is_empty() {
-                s.push_str(&format!(" [{}]", system));
+                let _ = write!(s, " [{system}]");
             }
             s
         }
@@ -238,7 +240,7 @@ pub fn humanize(
                 // The bare code adds nothing once it is spelled out.
                 Some(meaning) if decoded == c1 || decoded.is_empty() => meaning.to_string(),
                 Some(meaning) if !decoded.contains(meaning) => {
-                    format!("{} \u{b7} {}", meaning, decoded)
+                    format!("{meaning} \u{b7} {decoded}")
                 }
                 _ => decoded,
             }
@@ -262,6 +264,10 @@ fn person_name(family: &str, given: &str, middle: &str, suffix: &str, prefix: &s
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
     use super::*;
     use crate::parser::parse_str;
     use crate::validate::validate;
@@ -321,7 +327,7 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
 
     #[test]
     fn coded_values_are_not_repeated_after_their_meaning() {
-        let msg = parse_str(&format!("{}AL1|1|DA|PEN^Penicillin^L|SV\r", MSG));
+        let msg = parse_str(&format!("{MSG}AL1|1|DA|PEN^Penicillin^L|SV\r"));
         assert_eq!(humanized("AL1", 2, &msg).unwrap(), "Drug allergy");
         assert_eq!(humanized("AL1", 3, &msg).unwrap(), "Penicillin (PEN) [L]");
     }

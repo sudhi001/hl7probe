@@ -1,5 +1,6 @@
 //! HL7 DT/TM/DTM (a.k.a. TS) handling: strict parsing plus friendly rendering.
 
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,11 +25,11 @@ pub struct Timestamp {
     pub precision: Precision,
 }
 
-fn is_leap(y: i32) -> bool {
+const fn is_leap(y: i32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-pub fn days_in_month(y: i32, m: u32) -> u32 {
+pub const fn days_in_month(y: i32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -42,18 +43,26 @@ pub fn days_in_month(y: i32, m: u32) -> u32 {
 pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as i64;
-    let mp = ((m as i64) + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + (d as i64) - 1;
+    let yoe = i64::from(y - era * 400);
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    (era as i64) * 146097 + doe - 719468
+    i64::from(era) * 146_097 + doe - 719_468
 }
 
-pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+// `doy`, `mp` and `y` are bounded by the algorithm itself: the day-of-year and
+// month-position terms stay within a single year, and the year is derived from
+// an era count that only overflows i32 for inputs beyond +/-5.8 million years.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ranges are guaranteed by the civil-date algorithm"
+)]
+pub const fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
@@ -67,7 +76,8 @@ pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
 pub fn today() -> (i32, u32, u32) {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
         .unwrap_or(0);
     civil_from_days(secs / 86_400)
 }
@@ -91,22 +101,24 @@ impl Timestamp {
     pub fn display(&self) -> String {
         let mut out = self.date_string();
         match self.precision {
-            Precision::Hour => out.push_str(&format!(" {:02}:00", self.hour)),
-            Precision::Minute => out.push_str(&format!(" {:02}:{:02}", self.hour, self.minute)),
-            Precision::Second => out.push_str(&format!(
-                " {:02}:{:02}:{:02}",
-                self.hour, self.minute, self.second
-            )),
+            Precision::Hour => {
+                let _ = write!(out, " {:02}:00", self.hour);
+            }
+            Precision::Minute => {
+                let _ = write!(out, " {:02}:{:02}", self.hour, self.minute);
+            }
+            Precision::Second => {
+                let _ = write!(
+                    out,
+                    " {:02}:{:02}:{:02}",
+                    self.hour, self.minute, self.second
+                );
+            }
             _ => {}
         }
         if let Some(off) = self.offset_minutes {
             let sign = if off < 0 { '-' } else { '+' };
-            out.push_str(&format!(
-                " {}{:02}{:02}",
-                sign,
-                off.abs() / 60,
-                off.abs() % 60
-            ));
+            let _ = write!(out, " {}{:02}{:02}", sign, off.abs() / 60, off.abs() % 60);
         }
         out
     }
@@ -133,11 +145,11 @@ pub fn parse_ts(raw: &str) -> Result<Timestamp, String> {
         None => (body, None),
     };
     if !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("{:?} contains non-numeric characters", raw));
+        return Err(format!("{raw:?} contains non-numeric characters"));
     }
     if let Some(f) = fraction {
         if f.is_empty() || !f.chars().all(|c| c.is_ascii_digit()) || f.len() > 4 {
-            return Err(format!("{:?} has an invalid fractional second", raw));
+            return Err(format!("{raw:?} has an invalid fractional second"));
         }
         if digits.len() < 14 {
             return Err("fractional seconds require a full YYYYMMDDHHMMSS value".into());
@@ -153,8 +165,7 @@ pub fn parse_ts(raw: &str) -> Result<Timestamp, String> {
         14 => Precision::Second,
         n => {
             return Err(format!(
-                "{} digits is not a valid HL7 date/time length (expected 4, 6, 8, 10, 12 or 14)",
-                n
+                "{n} digits is not a valid HL7 date/time length (expected 4, 6, 8, 10, 12 or 14)"
             ))
         }
     };
@@ -162,7 +173,7 @@ pub fn parse_ts(raw: &str) -> Result<Timestamp, String> {
     let num = |start: usize, len: usize| -> u32 {
         digits[start..start + len].parse::<u32>().unwrap_or(0)
     };
-    let year = num(0, 4) as i32;
+    let year = i32::try_from(num(0, 4)).unwrap_or(0);
     let month = if digits.len() >= 6 { num(4, 2) } else { 1 };
     let day = if digits.len() >= 8 { num(6, 2) } else { 1 };
     let hour = if digits.len() >= 10 { num(8, 2) } else { 0 };
@@ -173,23 +184,22 @@ pub fn parse_ts(raw: &str) -> Result<Timestamp, String> {
         return Err("year 0000 is not a valid date".into());
     }
     if precision >= Precision::Month && !(1..=12).contains(&month) {
-        return Err(format!("month {:02} is out of range", month));
+        return Err(format!("month {month:02} is out of range"));
     }
     if precision >= Precision::Day && (day < 1 || day > days_in_month(year, month)) {
         return Err(format!(
-            "day {:02} does not exist in {:04}-{:02}",
-            day, year, month
+            "day {day:02} does not exist in {year:04}-{month:02}"
         ));
     }
     // Hour 24 is accepted by some senders as midnight; HL7 does not permit it.
     if hour > 23 {
-        return Err(format!("hour {:02} is out of range (00-23)", hour));
+        return Err(format!("hour {hour:02} is out of range (00-23)"));
     }
     if minute > 59 {
-        return Err(format!("minute {:02} is out of range (00-59)", minute));
+        return Err(format!("minute {minute:02} is out of range (00-59)"));
     }
     if second > 59 {
-        return Err(format!("second {:02} is out of range (00-59)", second));
+        return Err(format!("second {second:02} is out of range (00-59)"));
     }
 
     Ok(Timestamp {
@@ -222,10 +232,10 @@ pub fn parse_time(raw: &str) -> Result<(), String> {
     let (body, _) = split_offset(raw)?;
     let digits = body.split('.').next().unwrap_or("");
     if !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("{:?} contains non-numeric characters", raw));
+        return Err(format!("{raw:?} contains non-numeric characters"));
     }
     if ![2usize, 4, 6].contains(&digits.len()) {
-        return Err(format!("{:?} is not a valid HH[MM[SS]] time", raw));
+        return Err(format!("{raw:?} is not a valid HH[MM[SS]] time"));
     }
     let part = |i: usize| digits[i..i + 2].parse::<u32>().unwrap_or(99);
     if part(0) > 23 {
@@ -249,12 +259,12 @@ fn split_offset(raw: &str) -> Result<(&str, Option<i32>), String> {
     let sign = if off.starts_with('-') { -1 } else { 1 };
     let digits = &off[1..];
     if digits.len() != 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("timezone offset {:?} must be +/-HHMM", off));
+        return Err(format!("timezone offset {off:?} must be +/-HHMM"));
     }
     let hours: i32 = digits[0..2].parse().unwrap_or(99);
     let mins: i32 = digits[2..4].parse().unwrap_or(99);
     if hours > 14 || mins > 59 {
-        return Err(format!("timezone offset {:?} is out of range", off));
+        return Err(format!("timezone offset {off:?} is out of range"));
     }
     Ok((body, Some(sign * (hours * 60 + mins))))
 }
@@ -266,20 +276,24 @@ impl PartialOrd for Precision {
 }
 
 impl Precision {
-    fn rank(self) -> u8 {
+    const fn rank(self) -> u8 {
         match self {
-            Precision::Year => 0,
-            Precision::Month => 1,
-            Precision::Day => 2,
-            Precision::Hour => 3,
-            Precision::Minute => 4,
-            Precision::Second => 5,
+            Self::Year => 0,
+            Self::Month => 1,
+            Self::Day => 2,
+            Self::Hour => 3,
+            Self::Minute => 4,
+            Self::Second => 5,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
     use super::*;
 
     #[test]
@@ -292,7 +306,7 @@ mod tests {
             ("202401151432", Precision::Minute),
             ("20240115143200", Precision::Second),
         ] {
-            assert_eq!(parse_ts(raw).unwrap().precision, precision, "{}", raw);
+            assert_eq!(parse_ts(raw).unwrap().precision, precision, "{raw}");
         }
         assert!(
             parse_ts("20240115143200.5").is_ok(),
@@ -313,7 +327,7 @@ mod tests {
             "",
             "20240115.5",
         ] {
-            assert!(parse_ts(raw).is_err(), "{:?} should be rejected", raw);
+            assert!(parse_ts(raw).is_err(), "{raw:?} should be rejected");
         }
     }
 

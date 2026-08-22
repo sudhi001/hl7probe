@@ -84,6 +84,9 @@ struct Cli {
     #[arg(long)]
     raw: bool,
 
+    // The text is clap's --help output, so the brackets have to stay literal
+    // rather than become an intra-doc link.
+    #[allow(rustdoc::broken_intra_doc_links, reason = "OBX[2] is help text")]
     /// Print a single value, e.g. PID-5.1, OBX[2]-5 or PV1-3.2
     #[arg(short = 'f', long = "field", value_name = "PATH")]
     field: Option<String>,
@@ -115,7 +118,7 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("hl7probe: {}", e);
+            eprintln!("hl7probe: {e}");
             ExitCode::from(2)
         }
     }
@@ -209,12 +212,12 @@ fn format_files(files: &[ParsedFile], o: &render::Options, quiet: bool) -> TextR
         }
         if !quiet {
             for note in &file.notes {
-                let _ = writeln!(text, "{}", o.paint.yellow(&format!("note: {}", note)));
+                let _ = writeln!(text, "{}", o.paint.yellow(&format!("note: {note}")));
             }
         }
         for error in &file.errors {
             parse_failures += 1;
-            let _ = writeln!(text, "{}", o.paint.red(&format!("parse error: {}", error)));
+            let _ = writeln!(text, "{}", o.paint.red(&format!("parse error: {error}")));
         }
         for (index, (msg, report)) in file.messages.iter().enumerate() {
             worst = worst.max(report.worst());
@@ -235,7 +238,7 @@ fn format_files(files: &[ParsedFile], o: &render::Options, quiet: bool) -> TextR
                 );
             }
             for note in &msg.notes {
-                let _ = writeln!(text, "{}", o.paint.dim(&format!("note: {}", note)));
+                let _ = writeln!(text, "{}", o.paint.dim(&format!("note: {note}")));
             }
             text.push_str(&render::render_message(msg, report, o));
         }
@@ -275,11 +278,11 @@ fn write_out(text: &str) -> Result<(), String> {
     let mut stdout = std::io::stdout().lock();
     match stdout
         .write_all(text.as_bytes())
-        .and_then(|_| stdout.flush())
+        .and_then(|()| stdout.flush())
     {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(format!("stdout: {}", e)),
+        Err(e) => Err(format!("stdout: {e}")),
     }
 }
 
@@ -359,7 +362,7 @@ fn read_inputs(cli: &Cli) -> Result<Vec<Input>, String> {
         let mut buf = Vec::new();
         std::io::stdin()
             .read_to_end(&mut buf)
-            .map_err(|e| format!("stdin: {}", e))?;
+            .map_err(|e| format!("stdin: {e}"))?;
         inputs.push(Input {
             label: "<stdin>".into(),
             text: decode(buf),
@@ -369,9 +372,10 @@ fn read_inputs(cli: &Cli) -> Result<Vec<Input>, String> {
 }
 
 fn label_for(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.display().to_string())
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().to_string(),
+    )
 }
 
 fn read_file(path: &Path) -> Result<String, String> {
@@ -402,8 +406,7 @@ struct FieldPath {
 fn parse_field_path(spec_str: &str) -> Result<FieldPath, String> {
     let bad = || {
         format!(
-            "{:?} is not a field path - use SEG-n[.component[.subcomponent]], e.g. PID-5.1 or OBX[2]-5",
-            spec_str
+            "{spec_str:?} is not a field path - use SEG-n[.component[.subcomponent]], e.g. PID-5.1 or OBX[2]-5"
         )
     };
     let (head, tail) = spec_str.split_once('-').ok_or_else(bad)?;
@@ -433,12 +436,12 @@ fn parse_field_path(spec_str: &str) -> Result<FieldPath, String> {
     let field: usize = field_str.parse().map_err(|_| bad())?;
     let component = parts
         .next()
-        .map(|c| c.parse::<usize>())
+        .map(str::parse::<usize>)
         .transpose()
         .map_err(|_| bad())?;
     let subcomponent = parts
         .next()
-        .map(|c| c.parse::<usize>())
+        .map(str::parse::<usize>)
         .transpose()
         .map_err(|_| bad())?;
     Ok(FieldPath {
@@ -489,7 +492,7 @@ fn query_field(
                         o.paint.dim(&format!("{}#{}", file.label, i + 1)) + "\t" + &value
                     );
                 } else {
-                    println!("{}", value);
+                    println!("{value}");
                 }
             }
         }
@@ -550,16 +553,16 @@ fn message_json(msg: &Message, report: &Report) -> serde_json::Value {
         .map(|(i, seg)| {
             let fields: Vec<serde_json::Value> = (1..=seg.last_populated())
                 .filter(|s| seg.has(*s))
-                .map(|s| {
-                    let field = seg.field(s).unwrap();
-                    serde_json::json!({
+                .filter_map(|s| {
+                    let field = seg.field(s)?;
+                    Some(serde_json::json!({
                         "seq": s,
                         "name": spec::field_label(&seg.name, s),
                         "value": parser::unescape(&field.raw(sep), sep),
                         "repetitions": field.reps.iter().map(|r| {
                             r.comps.iter().map(|c| c.subs.clone()).collect::<Vec<_>>()
                         }).collect::<Vec<_>>(),
-                    })
+                    }))
                 })
                 .collect();
             serde_json::json!({
@@ -567,7 +570,7 @@ fn message_json(msg: &Message, report: &Report) -> serde_json::Value {
                 "description": spec::segment_desc(&seg.name),
                 "occurrence": seg.occurrence,
                 "line": seg.line,
-                "severity": report.segment_severity(i, true).map(|s| s.label()),
+                "severity": report.segment_severity(i, true).map(Severity::label),
                 "fields": fields,
             })
         })
@@ -605,4 +608,84 @@ fn message_json(msg: &Message, report: &Report) -> serde_json::Value {
             "notes": report.count(Severity::Info),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
+
+    use super::{decode, exit_code, label_for, parse_field_path};
+    use crate::validate::Severity;
+    use std::path::Path;
+    use std::process::ExitCode;
+
+    /// `ExitCode` is opaque, so compare the debug form the runtime prints.
+    fn code(c: ExitCode) -> String {
+        format!("{c:?}")
+    }
+
+    #[test]
+    fn exit_status_follows_the_documented_contract() {
+        let clean = code(ExitCode::SUCCESS);
+        let failure = code(ExitCode::from(1));
+        let unreadable = code(ExitCode::from(2));
+
+        assert_eq!(code(exit_code(None, 0, false)), clean);
+        assert_eq!(code(exit_code(Some(Severity::Error), 0, false)), failure);
+        assert_eq!(code(exit_code(Some(Severity::Warning), 0, false)), clean);
+        assert_eq!(code(exit_code(Some(Severity::Info), 0, true)), clean);
+        // --strict promotes warnings, but never notes.
+        assert_eq!(code(exit_code(Some(Severity::Warning), 0, true)), failure);
+        // An unreadable message outranks any finding severity.
+        assert_eq!(code(exit_code(None, 1, false)), unreadable);
+        assert_eq!(code(exit_code(Some(Severity::Error), 1, true)), unreadable);
+    }
+
+    #[test]
+    fn field_paths_decompose_into_their_parts() {
+        let p = parse_field_path("PID-5.1").unwrap();
+        assert_eq!((p.segment.as_str(), p.occurrence, p.field), ("PID", 1, 5));
+        assert_eq!(
+            (p.repetition, p.component, p.subcomponent),
+            (None, Some(1), None)
+        );
+
+        let p = parse_field_path("obx[2]-5").unwrap();
+        assert_eq!((p.segment.as_str(), p.occurrence, p.field), ("OBX", 2, 5));
+
+        let p = parse_field_path("PID-3[2].4.1").unwrap();
+        assert_eq!(
+            (p.field, p.repetition, p.component, p.subcomponent),
+            (3, Some(2), Some(4), Some(1))
+        );
+
+        // Occurrences are 1-based; [0] means the first one, not "none".
+        assert_eq!(parse_field_path("PID[0]-5").unwrap().occurrence, 1);
+    }
+
+    #[test]
+    fn malformed_field_paths_are_rejected() {
+        for bad in [
+            "PID", "-5", "PID-", "PIDD-1", "PI-1", "PID-x", "PID-5.x", "PID[x]-5", "", "-",
+        ] {
+            assert!(parse_field_path(bad).is_err(), "{bad:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn non_utf8_input_falls_back_to_latin_1() {
+        assert_eq!(decode(b"MSH|^~\\&|".to_vec()), "MSH|^~\\&|");
+        // 0xE9 is a bare latin-1 "e-acute": invalid UTF-8, still readable.
+        assert_eq!(decode(vec![b'A', 0xE9, b'B']), "A\u{e9}B");
+    }
+
+    #[test]
+    fn labels_prefer_the_file_name() {
+        assert_eq!(label_for(Path::new("/tmp/adt_a01.hl7")), "adt_a01.hl7");
+        assert_eq!(label_for(Path::new("adt.hl7")), "adt.hl7");
+        assert_eq!(label_for(Path::new("..")), "..");
+    }
 }

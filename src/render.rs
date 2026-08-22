@@ -1,5 +1,7 @@
 //! Terminal rendering of a parsed message and its validation report.
 
+use std::fmt::Write as _;
+
 use crate::datetime;
 use crate::parser::{Message, Segment};
 use crate::spec;
@@ -16,53 +18,55 @@ pub struct Paint {
     pub enabled: bool,
 }
 
+/// The methods take `self` by value: `Paint` is one byte, and a `&Paint`
+/// receiver would resolve to `OwoColorize`'s blanket impl instead of these.
 impl Paint {
-    pub fn new(enabled: bool) -> Paint {
-        Paint { enabled }
+    pub const fn new(enabled: bool) -> Self {
+        Self { enabled }
     }
-    pub fn dim(&self, s: &str) -> String {
+    pub fn dim(self, s: &str) -> String {
         if self.enabled {
             s.dimmed().to_string()
         } else {
             s.to_string()
         }
     }
-    pub fn bold(&self, s: &str) -> String {
+    pub fn bold(self, s: &str) -> String {
         if self.enabled {
             s.bold().to_string()
         } else {
             s.to_string()
         }
     }
-    pub fn red(&self, s: &str) -> String {
+    pub fn red(self, s: &str) -> String {
         if self.enabled {
             s.red().to_string()
         } else {
             s.to_string()
         }
     }
-    pub fn yellow(&self, s: &str) -> String {
+    pub fn yellow(self, s: &str) -> String {
         if self.enabled {
             s.yellow().to_string()
         } else {
             s.to_string()
         }
     }
-    pub fn green(&self, s: &str) -> String {
+    pub fn green(self, s: &str) -> String {
         if self.enabled {
             s.green().to_string()
         } else {
             s.to_string()
         }
     }
-    pub fn cyan(&self, s: &str) -> String {
+    pub fn cyan(self, s: &str) -> String {
         if self.enabled {
             s.cyan().to_string()
         } else {
             s.to_string()
         }
     }
-    pub fn severity(&self, sev: Severity, s: &str) -> String {
+    pub fn severity(self, sev: Severity, s: &str) -> String {
         match sev {
             Severity::Error => self.red(s),
             Severity::Warning => self.yellow(s),
@@ -86,44 +90,45 @@ pub struct Options {
     pub raw: bool,
 }
 
-pub fn glyph(sev: Option<Severity>) -> &'static str {
+pub const fn glyph(sev: Option<Severity>) -> &'static str {
     match sev {
         None => OK,
         Some(s) => s.glyph(),
     }
 }
 
-fn paint_status(p: &Paint, sev: Option<Severity>) -> String {
+fn paint_status(p: Paint, sev: Option<Severity>) -> String {
     match sev {
         None => p.green(OK),
         Some(s) => p.severity(s, s.glyph()),
     }
 }
 
-fn rule(p: &Paint, width: usize) -> String {
+fn rule(p: Paint, width: usize) -> String {
     p.dim(&RULE.to_string().repeat(width))
 }
 
 /// Header block: version, message type, routing and identifiers.
 pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
-    let p = &o.paint;
+    let p = o.paint;
     let sep = &msg.sep;
     let mut out = String::new();
     let version = msg.version();
     let version_label = if version.is_empty() {
         "HL7 (no version)".to_string()
     } else {
-        format!("HL7 v{}", version)
+        format!("HL7 v{version}")
     };
     let type_label = msg.type_label();
     let desc = report
         .structure
         .map(|s| s.desc.to_string())
-        .or_else(|| spec::trigger_desc(&msg.message_type().1).map(|s| s.to_string()))
+        .or_else(|| spec::trigger_desc(&msg.message_type().1).map(ToString::to_string))
         .unwrap_or_default();
 
-    out.push_str(&format!(
-        "{}   {}{}\n",
+    let _ = writeln!(
+        out,
+        "{}   {}{}",
         p.bold(&version_label),
         p.cyan(&p.bold(&type_label)),
         if desc.is_empty() {
@@ -131,7 +136,7 @@ pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
         } else {
             format!("   {}", p.dim(&desc))
         }
-    ));
+    );
 
     let mut meta: Vec<String> = Vec::new();
     let control = msg.control_id();
@@ -163,7 +168,7 @@ pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
         meta.push(meaning.to_string());
     }
     if !meta.is_empty() {
-        out.push_str(&format!("{}\n", p.dim(&meta.join("  \u{b7}  "))));
+        let _ = writeln!(out, "{}", p.dim(&meta.join("  \u{b7}  ")));
     }
     out
 }
@@ -173,40 +178,42 @@ fn join_app(app: &str, facility: &str) -> String {
         (true, true) => String::new(),
         (false, true) => app.to_string(),
         (true, false) => facility.to_string(),
-        (false, false) => format!("{}/{}", app, facility),
+        (false, false) => format!("{app}/{facility}"),
     }
 }
 
 /// The `MSH ✓ / EVN ✓ / PID ⚠` overview.
 pub fn segment_overview(msg: &Message, report: &Report, o: &Options) -> String {
-    let p = &o.paint;
+    let p = o.paint;
     let mut out = String::new();
-    out.push_str(&format!("{}\n", p.bold("Segments")));
-    out.push_str(&format!("{}\n", rule(p, o.width.min(60))));
+    let _ = writeln!(out, "{}", p.bold("Segments"));
+    let _ = writeln!(out, "{}", rule(p, o.width.min(60)));
     for (i, seg) in msg.segments.iter().enumerate() {
         let sev = report.segment_severity(i, o.verbose);
-        let desc = spec::segment_desc(&seg.name)
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| {
+        let desc = spec::segment_desc(&seg.name).map_or_else(
+            || {
                 if seg.is_custom() {
                     "site-defined segment".into()
                 } else {
                     "unknown segment".into()
                 }
-            });
+            },
+            ToString::to_string,
+        );
         let repeat = msg.find(&seg.name).len();
         let occurrence = if repeat > 1 {
             p.dim(&format!(" ({}/{})", seg.occurrence, repeat))
         } else {
             String::new()
         };
-        out.push_str(&format!(
-            "{} {}{}  {}\n",
+        let _ = writeln!(
+            out,
+            "{} {}{}  {}",
             p.bold(&seg.name),
             paint_status(p, sev),
             occurrence,
             p.dim(&desc)
-        ));
+        );
     }
     out
 }
@@ -218,7 +225,7 @@ struct Columns {
 }
 
 impl Columns {
-    fn for_rows(rows: &[FieldRow], width: usize) -> Columns {
+    fn for_rows(rows: &[FieldRow], width: usize) -> Self {
         let label = rows
             .iter()
             .map(|r| r.label.chars().count())
@@ -226,7 +233,7 @@ impl Columns {
             .unwrap_or(10)
             .clamp(10, 34)
             + 2;
-        Columns {
+        Self {
             label,
             value: width.saturating_sub(label + 10).max(16),
         }
@@ -235,7 +242,7 @@ impl Columns {
 
 /// Formats one row: `⚠  11  Patient Address   123 Main St   › decoded`.
 fn format_row(row: &FieldRow, columns: &Columns, o: &Options) -> String {
-    let p = &o.paint;
+    let p = o.paint;
     let status = match row.severity {
         Some(s) => p.severity(s, s.glyph()),
         None => " ".to_string(),
@@ -246,7 +253,7 @@ fn format_row(row: &FieldRow, columns: &Columns, o: &Options) -> String {
     };
     let label = match row.repetition {
         None => truncate(&row.label, columns.label - 1),
-        Some(n) => format!("~ rep {}", n),
+        Some(n) => format!("~ rep {n}"),
     };
 
     if !row.present {
@@ -254,7 +261,7 @@ fn format_row(row: &FieldRow, columns: &Columns, o: &Options) -> String {
         let suffix = if note.is_empty() {
             "(empty)".to_string()
         } else {
-            format!("(empty)  {}", note)
+            format!("(empty)  {note}")
         };
         return format!(
             "{} {} {}{}",
@@ -278,13 +285,14 @@ fn format_row(row: &FieldRow, columns: &Columns, o: &Options) -> String {
             .width
             .saturating_sub(8 + columns.label + value.chars().count());
         if room > 12 {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "  {}",
                 p.dim(&format!(
                     "\u{203a} {}",
                     truncate(decoded, room.saturating_sub(3))
                 ))
-            ));
+            );
         }
     }
     out
@@ -298,7 +306,7 @@ pub fn segment_detail(
     report: &Report,
     o: &Options,
 ) -> String {
-    let p = &o.paint;
+    let p = o.paint;
     let mut out = String::new();
     let desc = spec::segment_desc(&seg.name).unwrap_or("");
     let count = msg.find(&seg.name).len();
@@ -312,14 +320,15 @@ pub fn segment_detail(
     } else {
         format!("{} {} {}", p.bold(&title), p.dim("\u{b7}"), p.dim(desc))
     };
-    out.push_str(&format!(
-        "{}{}\n",
+    let _ = writeln!(
+        out,
+        "{}{}",
         heading,
         p.dim(&format!("   line {}", seg.line))
-    ));
-    out.push_str(&format!("{}\n", rule(p, o.width.min(72))));
+    );
+    let _ = writeln!(out, "{}", rule(p, o.width.min(72)));
     if o.raw {
-        out.push_str(&format!("{}\n", p.dim(&truncate(&seg.raw, o.width))));
+        let _ = writeln!(out, "{}", p.dim(&truncate(&seg.raw, o.width)));
     }
 
     let rows = segment_rows(
@@ -332,7 +341,7 @@ pub fn segment_detail(
         },
     );
     if rows.is_empty() {
-        out.push_str(&format!("{}\n", p.dim("(no populated fields)")));
+        let _ = writeln!(out, "{}", p.dim("(no populated fields)"));
     }
     let columns = Columns::for_rows(&rows, o.width);
     for row in &rows {
@@ -344,10 +353,10 @@ pub fn segment_detail(
 
 /// Validation summary: one line per check category, then the findings.
 pub fn validation(report: &Report, o: &Options) -> String {
-    let p = &o.paint;
+    let p = o.paint;
     let mut out = String::new();
-    out.push_str(&format!("{}\n", p.bold("Validation")));
-    out.push_str(&format!("{}\n", rule(p, o.width.min(60))));
+    let _ = writeln!(out, "{}", p.bold("Validation"));
+    let _ = writeln!(out, "{}", rule(p, o.width.min(60)));
 
     for cat in Category::ALL {
         let sev = report
@@ -360,19 +369,19 @@ pub fn validation(report: &Report, o: &Options) -> String {
         let note = match cat {
             Category::Structure => report
                 .structure
-                .map(|s| s.id.to_string())
-                .unwrap_or_else(|| "no profile matched".into()),
+                .map_or_else(|| "no profile matched".into(), |s| s.id.to_string()),
             _ => String::new(),
         };
         if note.is_empty() {
-            out.push_str(&format!("{} {}\n", paint_status(p, sev), cat.title()));
+            let _ = writeln!(out, "{} {}", paint_status(p, sev), cat.title());
         } else {
-            out.push_str(&format!(
-                "{} {}{}\n",
+            let _ = writeln!(
+                out,
+                "{} {}{}",
                 paint_status(p, sev),
                 pad(cat.title(), 18),
                 p.dim(&note)
-            ));
+            );
         }
     }
 
@@ -403,13 +412,13 @@ pub fn validation(report: &Report, o: &Options) -> String {
         } else {
             String::new()
         };
-        out.push_str(&format!("{}{}\n", head, detail));
+        let _ = writeln!(out, "{head}{detail}");
     }
     out
 }
 
 pub fn summary_line(report: &Report, o: &Options) -> String {
-    let p = &o.paint;
+    let p = o.paint;
     let errors = report.errors();
     let warnings = report.warnings();
     let infos = report.count(Severity::Info);
@@ -481,6 +490,10 @@ pub fn render_message(msg: &Message, report: &Report, o: &Options) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
     use super::*;
     use crate::parser::parse_str;
     use crate::validate::validate;
@@ -511,7 +524,7 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
         assert!(text.contains("ADT^A01"));
         assert!(text.contains("Admit / Visit Notification"));
         for segment in ["MSH", "EVN", "PID", "PV1"] {
-            assert!(text.contains(segment), "missing {}", segment);
+            assert!(text.contains(segment), "missing {segment}");
         }
         assert!(text.contains("Patient Identifier List"));
         assert!(text.contains("message passes all checks"));
@@ -580,8 +593,7 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
     fn long_values_are_truncated_to_the_terminal_width() {
         let long = "X".repeat(400);
         let msg = parse_str(&format!(
-            "MSH|^~\\&|HIS|MERCY|LIS|LAB|20240115143200||ADT^A01|MSG1|P|2.5.1\rPID|1||1^^^A^MR||{}\r",
-            long
+            "MSH|^~\\&|HIS|MERCY|LIS|LAB|20240115143200||ADT^A01|MSG1|P|2.5.1\rPID|1||1^^^A^MR||{long}\r"
         ));
         let report = validate(&msg);
         let mut narrow = options();

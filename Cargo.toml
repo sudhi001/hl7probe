@@ -38,3 +38,26 @@ strip = true
 # restores the terminal before aborting.
 codegen-units = 1
 panic = "abort"
+
+# Lint policy lives here rather than in CI flags or crate attributes, so
+# `cargo clippy` locally and in CI enforce exactly the same set.
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Nursery lints worth keeping, picked individually: the group as a whole moves
+# too often to hold a `-D warnings` build steady across toolchain bumps.
+missing_const_for_fn = "warn"
+redundant_clone = "warn"
+# hl7probe parses input it does not control, so a panic is a bug, not a result.
+# Test modules opt back out.
+unwrap_used = "warn"
+
+# Deliberate exceptions. Each is a style call the codebase makes on purpose.
+struct_excessive_bools = "allow"  # Cli and render::Options are flag bags.
+too_many_lines = "allow"          # Report rendering reads better unsplit.
+many_single_char_names = "allow"  # Date arithmetic uses the textbook names.

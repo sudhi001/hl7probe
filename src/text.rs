@@ -27,6 +27,10 @@ pub fn fit(s: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
     use super::*;
 
     #[test]

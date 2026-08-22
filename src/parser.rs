@@ -1,6 +1,8 @@
 //! HL7 v2 lexical parser: MLLP/batch stripping, segment/field/component/subcomponent
 //! decomposition and escape-sequence handling.
 
+use std::fmt::Write as _;
+
 use std::fmt;
 
 /// The five delimiters an HL7 v2 message declares in MSH-1 and MSH-2.
@@ -15,7 +17,7 @@ pub struct Separators {
 
 impl Default for Separators {
     fn default() -> Self {
-        Separators {
+        Self {
             field: '|',
             component: '^',
             repetition: '~',
@@ -28,7 +30,7 @@ impl Default for Separators {
 impl Separators {
     /// Reads MSH-1 (the character right after `MSH`) and MSH-2 (the encoding
     /// characters up to the next field separator).
-    fn from_msh(line: &str) -> Result<Separators, ParseError> {
+    fn from_msh(line: &str) -> Result<Self, ParseError> {
         let chars: Vec<char> = line.chars().collect();
         if chars.len() < 4 {
             return Err(ParseError::new(
@@ -40,15 +42,12 @@ impl Separators {
         if field.is_alphanumeric() || field.is_whitespace() {
             return Err(ParseError::new(
                 0,
-                format!(
-                    "MSH-1 field separator {:?} is not a usable delimiter",
-                    field
-                ),
+                format!("MSH-1 field separator {field:?} is not a usable delimiter"),
             ));
         }
         let enc: String = chars[4..].iter().take_while(|c| **c != field).collect();
         let e: Vec<char> = enc.chars().collect();
-        let mut sep = Separators {
+        let mut sep = Self {
             field,
             ..Default::default()
         };
@@ -102,7 +101,7 @@ pub struct ParseError {
 
 impl ParseError {
     fn new(line: usize, message: impl Into<String>) -> Self {
-        ParseError {
+        Self {
             line,
             message: message.into(),
         }
@@ -129,11 +128,10 @@ impl Component {
     pub fn sub(&self, seq: usize) -> &str {
         self.subs
             .get(seq.wrapping_sub(1))
-            .map(|s| s.as_str())
-            .unwrap_or("")
+            .map_or("", String::as_str)
     }
     pub fn is_empty(&self) -> bool {
-        self.subs.iter().all(|s| s.is_empty())
+        self.subs.iter().all(String::is_empty)
     }
     fn raw(&self, sep: &Separators) -> String {
         self.subs.join(&sep.subcomponent.to_string())
@@ -156,7 +154,7 @@ impl Repetition {
         self.comp(seq).raw(sep)
     }
     pub fn is_empty(&self) -> bool {
-        self.comps.iter().all(|c| c.is_empty())
+        self.comps.iter().all(Component::is_empty)
     }
     pub fn raw(&self, sep: &Separators) -> String {
         self.comps
@@ -170,8 +168,7 @@ impl Repetition {
         self.comps
             .iter()
             .rposition(|c| !c.is_empty())
-            .map(|i| i + 1)
-            .unwrap_or(0)
+            .map_or(0, |i| i + 1)
     }
 }
 
@@ -185,9 +182,9 @@ pub struct Field {
 }
 
 impl Field {
-    fn literal(value: impl Into<String>) -> Field {
+    fn literal(value: impl Into<String>) -> Self {
         let value = value.into();
-        Field {
+        Self {
             reps: vec![Repetition {
                 comps: vec![Component {
                     subs: vec![value.clone()],
@@ -198,7 +195,7 @@ impl Field {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.reps.iter().all(|r| r.is_empty())
+        self.reps.iter().all(Repetition::is_empty)
     }
 
     /// HL7 explicit null: the two-character value `""` means "delete this value".
@@ -251,7 +248,7 @@ impl Segment {
 
     /// True when field `seq` exists and carries data.
     pub fn has(&self, seq: usize) -> bool {
-        self.field(seq).map(|f| !f.is_empty()).unwrap_or(false)
+        self.field(seq).is_some_and(|f| !f.is_empty())
     }
 
     /// Field `seq` as raw text, or `""` when absent.
@@ -269,8 +266,7 @@ impl Segment {
         self.fields
             .iter()
             .rposition(|f| !f.is_empty())
-            .map(|i| i + 1)
-            .unwrap_or(0)
+            .map_or(0, |i| i + 1)
     }
 
     /// Z-segments are site-defined and exempt from dictionary checks.
@@ -278,7 +274,7 @@ impl Segment {
         self.name.starts_with('Z')
     }
 
-    fn parse(name: &str, raw: &str, line: usize, sep: &Separators) -> Segment {
+    fn parse(name: &str, raw: &str, line: usize, sep: &Separators) -> Self {
         let parts: Vec<&str> = raw.split(sep.field).collect();
         let mut fields: Vec<Field> = Vec::new();
         // MSH is positionally special: MSH-1 *is* the field separator, so the
@@ -293,7 +289,7 @@ impl Segment {
         for part in rest {
             fields.push(parse_field(part, sep));
         }
-        Segment {
+        Self {
             name: name.to_string(),
             line,
             occurrence: 1,
@@ -310,7 +306,7 @@ fn parse_field(s: &str, sep: &Separators) -> Field {
             comps: rep
                 .split(sep.component)
                 .map(|c| Component {
-                    subs: c.split(sep.subcomponent).map(|s| s.to_string()).collect(),
+                    subs: c.split(sep.subcomponent).map(ToString::to_string).collect(),
                 })
                 .collect(),
         })
@@ -358,7 +354,7 @@ impl Message {
         match (code.is_empty(), trigger.is_empty()) {
             (true, _) => "(no MSH-9)".to_string(),
             (false, true) => code,
-            (false, false) => format!("{}^{}", code, trigger),
+            (false, false) => format!("{code}^{trigger}"),
         }
     }
 
@@ -402,7 +398,7 @@ pub fn split_messages(raw: &str) -> (Vec<RawMessage>, Vec<String>) {
         let head: String = cleaned.chars().take(3).collect();
         match head.as_str() {
             "FHS" | "BHS" | "BTS" | "FTS" => {
-                pending_notes.push(format!("line {}: batch wrapper {} skipped", lineno, head));
+                pending_notes.push(format!("line {lineno}: batch wrapper {head} skipped"));
                 continue;
             }
             _ => {}
@@ -418,8 +414,7 @@ pub fn split_messages(raw: &str) -> (Vec<RawMessage>, Vec<String>) {
         } else if !stray_reported {
             stray_reported = true;
             warnings.push(format!(
-                "line {}: content before the first MSH segment was ignored",
-                lineno
+                "line {lineno}: content before the first MSH segment was ignored"
             ));
         }
     }
@@ -441,11 +436,7 @@ pub fn parse_message(raw: &RawMessage) -> Result<Message, ParseError> {
             && name
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-            && name
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_uppercase())
-                .unwrap_or(false);
+            && name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
         if !valid_name {
             notes.push(format!(
                 "line {}: skipped unrecognisable segment starting {:?}",
@@ -456,21 +447,17 @@ pub fn parse_message(raw: &RawMessage) -> Result<Message, ParseError> {
         }
         if text.chars().nth(3) != Some(sep.field) {
             notes.push(format!(
-                "line {}: segment {} has no field separator after the name",
-                lineno, name
+                "line {lineno}: segment {name} has no field separator after the name"
             ));
         }
         let mut seg = Segment::parse(&name, text, *lineno, &sep);
         let entry = counts.iter_mut().find(|(n, _)| n == &name);
-        seg.occurrence = match entry {
-            Some((_, c)) => {
-                *c += 1;
-                *c
-            }
-            None => {
-                counts.push((name.clone(), 1));
-                1
-            }
+        seg.occurrence = if let Some((_, c)) = entry {
+            *c += 1;
+            *c
+        } else {
+            counts.push((name.clone(), 1));
+            1
         };
         segments.push(seg);
     }
@@ -518,33 +505,36 @@ pub fn unescape(s: &str, sep: &Separators) -> String {
             "S" => out.push(sep.component),
             "T" => out.push(sep.subcomponent),
             "R" => out.push(sep.repetition),
-            "E" => out.push(sep.escape),
-            ".br" => out.push('\n'),
-            ".sp" => out.push('\n'),
-            "" => out.push(sep.escape),
+            ".br" | ".sp" => out.push('\n'),
+            // \E\ is the escape character itself; \\ is the same thing written bare.
+            "E" | "" => out.push(sep.escape),
             other if other.starts_with('X') => {
                 let hex = &other[1..];
-                let mut bytes = Vec::new();
-                let mut ok = hex.len() % 2 == 0 && !hex.is_empty();
-                for pair in hex.as_bytes().chunks(2) {
-                    match u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("zz"), 16) {
-                        Ok(b) => bytes.push(b),
-                        Err(_) => {
-                            ok = false;
-                            break;
-                        }
+                // Collecting into `Option<Vec<_>>` stops at the first bad pair,
+                // so a malformed \Xnn\ falls through to the literal branch.
+                let decoded = (!hex.is_empty() && hex.len() % 2 == 0)
+                    .then(|| {
+                        hex.as_bytes()
+                            .chunks(2)
+                            .map(|pair| {
+                                u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
+                            })
+                            .collect::<Option<Vec<u8>>>()
+                    })
+                    .flatten();
+                match decoded {
+                    Some(bytes) => out.push_str(&String::from_utf8_lossy(&bytes)),
+                    None => {
+                        let _ = write!(out, "{}{}{}", sep.escape, other, sep.escape);
                     }
-                }
-                if ok {
-                    out.push_str(&String::from_utf8_lossy(&bytes));
-                } else {
-                    out.push_str(&format!("{}{}{}", sep.escape, other, sep.escape));
                 }
             }
             // Highlighting and site-defined escapes carry no display text.
             other if other.starts_with('H') || other.starts_with('N') || other.starts_with('Z') => {
             }
-            other => out.push_str(&format!("{}{}{}", sep.escape, other, sep.escape)),
+            other => {
+                let _ = write!(out, "{}{}{}", sep.escape, other, sep.escape);
+            }
         }
         i = end + 1;
     }
@@ -559,6 +549,10 @@ pub fn parse_str(text: &str) -> Message {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "panicking is the failure mode a test wants"
+    )]
     use super::*;
 
     const ADT: &str = "MSH|^~\\&|HIS|MERCY|LIS|LAB|20240115143200||ADT^A01^ADT_A01|MSG1|P|2.5.1\r\
@@ -624,7 +618,7 @@ PV1|1|I|ER^101^A&Bay 2^MERCY\r";
             "\u{b}MSH|^~\\&|A|B|C|D|20240101120000||ACK|1|P|2.5.1\rMSA|AA|1\r\u{1c}\r",
         ] {
             let m = parse_str(text);
-            assert_eq!(m.segments.len(), 2, "{:?}", text);
+            assert_eq!(m.segments.len(), 2, "{text:?}");
             assert_eq!(m.segments[1].name, "MSA");
         }
     }

@@ -1,4 +1,8 @@
 //! End-to-end tests: run the built binary the way a user would.
+#![allow(
+    clippy::unwrap_used,
+    reason = "panicking is the failure mode a test wants"
+)]
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -43,7 +47,7 @@ fn code(out: &Output) -> i32 {
 fn reports_a_clean_message_and_exits_zero() {
     let out = run(&["examples/adt_a01.hl7"]);
     let text = stdout(&out);
-    assert_eq!(code(&out), 0, "{}", text);
+    assert_eq!(code(&out), 0, "{text}");
     assert!(text.contains("HL7 v2.5.1"));
     assert!(text.contains("ADT^A01"));
     assert!(text.contains("Admit / Visit Notification"));
@@ -56,7 +60,7 @@ fn reports_a_clean_message_and_exits_zero() {
 fn invalid_message_lists_findings_and_exits_one() {
     let out = run(&["examples/invalid.hl7"]);
     let text = stdout(&out);
-    assert_eq!(code(&out), 1, "{}", text);
+    assert_eq!(code(&out), 1, "{text}");
     for expected in [
         "required segment is missing",
         "PID-7",
@@ -65,12 +69,7 @@ fn invalid_message_lists_findings_and_exits_one() {
         "invalid location",
         "OBX-5",
     ] {
-        assert!(
-            text.contains(expected),
-            "missing {:?} in:\n{}",
-            expected,
-            text
-        );
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
     }
 }
 
@@ -100,7 +99,7 @@ fn quiet_mode_prints_one_line_per_message() {
     let out = run(&["-q", "examples/adt_a01.hl7", "examples/batch.hl7"]);
     let text = stdout(&out);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 3, "{}", text);
+    assert_eq!(lines.len(), 3, "{text}");
     assert!(lines[0].starts_with("adt_a01.hl7"));
     assert!(lines[1].starts_with("batch.hl7#1"));
     assert!(lines[2].starts_with("batch.hl7#2"));

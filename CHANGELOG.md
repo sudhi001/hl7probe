@@ -7,6 +7,27 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- The lint policy moved into a `[lints]` table in `Cargo.toml`, so a local
+  `cargo clippy` enforces exactly what CI does: `clippy::pedantic`, plus
+  `unsafe_code = "forbid"` and `clippy::unwrap_used` for the code that handles
+  input the tool does not control. Test modules opt out of the latter.
+- Roughly 180 pedantic findings cleared: inline format arguments, `write!`
+  instead of `push_str(&format!(..))`, `const fn` where the body allows it,
+  and checked conversions in place of every `as` cast that could truncate or
+  change sign. Output is byte-identical across the example messages and 3600
+  mutated ones.
+- The two `unwrap()` calls left in non-test code became `let ... else` and
+  `filter_map`; both were already guarded, so nothing changes at runtime.
+
+### Added
+
+- Unit tests for the exit-status contract, field-path parsing, the latin-1
+  input fallback and file labelling.
+- CI builds and tests on the declared minimum Rust version, builds with
+  `--locked`, and fails on rustdoc warnings.
+
 ## [0.2.2] - 2026-08-18
 
 ### Changed

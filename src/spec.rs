@@ -653,9 +653,7 @@ pub fn field_spec(segment: &str, seq: usize) -> Option<&'static FieldSpec> {
 
 /// Human label for `SEG-n`, falling back to a positional name.
 pub fn field_label(segment: &str, seq: usize) -> String {
-    field_spec(segment, seq)
-        .map(|f| f.name.to_string())
-        .unwrap_or_else(|| format!("Field {}", seq))
+    field_spec(segment, seq).map_or_else(|| format!("Field {seq}"), |f| f.name.to_string())
 }
 
 // ---------------------------------------------------------------- code tables
@@ -1933,7 +1931,7 @@ const MESSAGES: &[MessageSpec] = &[
 /// Looks up the abstract structure for `code^trigger`, falling back to the bare
 /// message code (ACK has no trigger event of its own in most profiles).
 pub fn message_spec(code: &str, trigger: &str) -> Option<&'static MessageSpec> {
-    let key = format!("{}^{}", code, trigger);
+    let key = format!("{code}^{trigger}");
     MESSAGES
         .iter()
         .find(|m| m.id == key)
@@ -1947,7 +1945,5 @@ pub fn trigger_desc(trigger: &str) -> Option<&'static str> {
 
 /// Versions this tool knows how to reason about.
 pub fn is_known_version(v: &str) -> bool {
-    table("0104")
-        .map(|t| t.meaning(v).is_some())
-        .unwrap_or(false)
+    table("0104").is_some_and(|t| t.meaning(v).is_some())
 }
