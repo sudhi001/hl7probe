@@ -1,6 +1,6 @@
 [package]
 name = "hl7probe"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Inspect and validate HL7 v2 messages from the command line"
 license = "MIT"
