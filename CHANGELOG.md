@@ -9,13 +9,27 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Changed
 
-- The text report streams. Messages are parsed, written and dropped one at a
-  time instead of the whole batch being held in memory, so peak memory follows
-  the largest message rather than the size of the file. A 26 MB batch of 50,000
-  messages drops from 2.4 GB to 129 MB, and runs faster for it: `-q` over that
-  file goes from 2.1s to 1.2s. Output is unchanged, including the placement of
-  parse errors above the messages they sit among - a scan pass finds the
-  unreadable messages first, reading only each MSH line.
+- Every output mode but the interactive viewer streams. Messages are parsed,
+  used and dropped one at a time instead of the whole batch being held in
+  memory, so peak memory follows the largest message rather than the size of
+  the file. Over a 26 MB batch of 50,000 messages:
+
+  | Command | Before | After |
+  | --- | --- | --- |
+  | `hl7probe -q` | 2,234 MB / 1.50s | 129 MB / 1.25s |
+  | `hl7probe -f PID-5.1` | 2,234 MB / 1.54s | 129 MB / 0.57s |
+  | `hl7probe` | 2,417 MB / 3.76s | 129 MB / 3.50s |
+  | `hl7probe --json` | 4,598 MB / 11.16s | 129 MB / 6.51s |
+
+  It is faster as well as smaller, because the allocator is no longer carrying
+  most of a gigabyte of live objects. The viewer still parses the batch up
+  front; it has to, to let you page back and forth. Output is unchanged,
+  including the placement of parse errors above the messages they sit among -
+  a scan pass finds the unreadable messages first, reading only each MSH line.
+- `--json` is written straight to stdout as the messages are parsed rather than
+  assembled as one `serde_json::Value` tree and then printed. The document's
+  `status` still reflects the whole run, because serde_json orders keys
+  alphabetically and `status` sorts after `files`.
 - `parse_message` decides both of its failure modes on a message's first line
   now rather than after building the segment list, which is what makes that
   scan cheap. The check the two share lives in one place so they cannot drift.
@@ -31,13 +45,23 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - The two `unwrap()` calls left in non-test code became `let ... else` and
   `filter_map`; both were already guarded, so nothing changes at runtime.
 
+### Fixed
+
+- `hl7probe -f PID-5.1 big.hl7 | head` panicked instead of ending quietly when
+  the reader closed the pipe. The field query printed with `println!`, which
+  fails hard on a closed stdout; it now goes through the same buffered writer
+  as the report.
+
 ### Added
 
 - Unit tests for the exit-status contract, field-path parsing, the latin-1
   input fallback and file labelling.
 - Tests covering a batch with an unreadable message in the middle: the parse
   error still prints above the readable messages, the numbering still counts
-  only the messages that parse, and a closed pipe still ends the run quietly.
+  only the messages that parse, the JSON document describes only the readable
+  ones, and a closed pipe still ends the run quietly.
+- A Performance section in the README, with the numbers above and the steps to
+  reproduce them.
 - CI builds and tests on the declared minimum Rust version, builds with
   `--locked`, and fails on rustdoc warnings.
 

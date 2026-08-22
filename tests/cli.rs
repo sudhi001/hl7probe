@@ -276,3 +276,66 @@ fn a_closed_pipe_is_not_an_error() {
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(!err.contains("stdout:"), "{err}");
 }
+
+#[test]
+fn json_reports_a_batch_with_an_unreadable_message() {
+    let out = pipe(&["--json"], &batch_with_a_broken_message());
+    let text = stdout(&out);
+    assert_eq!(code(&out), 2, "{text}");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+
+    // The document is written as the messages are parsed, so the trailing
+    // status has to reflect everything that came before it.
+    assert_eq!(value["status"], "error");
+    let file = &value["files"][0];
+    assert_eq!(file["parse_errors"].as_array().unwrap().len(), 1);
+    let messages = file["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "only the readable ones are described");
+    for message in messages {
+        assert_eq!(message["type"], "ADT^A01");
+    }
+}
+
+#[test]
+fn json_status_carries_the_worst_severity_in_the_batch() {
+    let clean = std::fs::read_to_string("examples/adt_a01.hl7")
+        .unwrap()
+        .replace('\n', "\r");
+    let broken = std::fs::read_to_string("examples/invalid.hl7")
+        .unwrap()
+        .replace('\n', "\r");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout(&pipe(&["--json"], &clean))).unwrap();
+    assert_eq!(value["status"], "ok");
+
+    // The failing message is last, so status can only be right if the walk
+    // finished before status was written.
+    let out = pipe(&["--json"], &format!("{clean}{broken}"));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(value["status"], "error");
+    assert_eq!(code(&out), 1);
+}
+
+#[test]
+fn a_field_query_survives_a_closed_pipe() {
+    // This used to panic: the query printed with `println!`, which fails hard
+    // when the reader has gone away.
+    let batch = std::fs::read_to_string("examples/adt_a01.hl7")
+        .unwrap()
+        .replace('\n', "\r")
+        .repeat(400);
+    let mut child = Command::new(BIN)
+        .args(["-f", "PID-5.1", "-"])
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.as_mut().unwrap().write_all(batch.as_bytes());
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!err.contains("panicked"), "{err}");
+}

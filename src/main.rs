@@ -9,11 +9,14 @@ mod tui;
 mod validate;
 mod view;
 
+use std::cell::Cell;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser, ValueEnum};
+use serde::ser::{SerializeMap as _, SerializeSeq as _};
+use serde::{Serialize, Serializer};
 
 use parser::Message;
 use validate::{Report, Severity};
@@ -146,42 +149,38 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
         raw: cli.raw,
     };
 
-    // The viewer, the JSON document and a field query all need every message
-    // addressable at once, so those modes parse the batch up front.
-    if cli.tui || cli.json || cli.field.is_some() {
-        let mut files: Vec<ParsedFile> = Vec::new();
-        for input in &inputs {
-            files.push(parse_file(input, cli.message)?);
-        }
-        if let Some(path) = &cli.field {
-            return query_field(&files, path, &options);
-        }
-        if cli.tui {
-            let all: Vec<(String, Message, Report)> = files
-                .into_iter()
-                .flat_map(|f| {
-                    let label = f.label.clone();
-                    f.messages
-                        .into_iter()
-                        .map(move |(m, r)| (label.clone(), m, r))
-                })
-                .collect();
-            if all.is_empty() {
-                return Err("no parsable messages to display".into());
-            }
-            tui::run(all).map_err(|e| e.to_string())?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        return emit_json(&files, cli.strict);
-    }
-
-    // The text report does not: it parses, writes and drops one message before
-    // touching the next, so peak memory follows the largest message rather than
-    // the size of the batch.
+    // Every mode works from the split-but-unparsed messages. Only the viewer,
+    // which has to let you page back and forth, parses the whole batch; the
+    // rest parse, use and drop one message at a time, so peak memory follows
+    // the largest message rather than the size of the file.
     let mut files: Vec<ScannedFile> = Vec::new();
     for input in inputs {
         files.push(scan_file(input, cli.message)?);
     }
+
+    if let Some(path) = &cli.field {
+        return query_field(&files, path, &options);
+    }
+    if cli.tui {
+        let mut all: Vec<(String, Message, Report)> = Vec::new();
+        for file in &files {
+            for raw in file.selected() {
+                if let Ok(msg) = parser::parse_message(raw) {
+                    let report = validate::validate(&msg);
+                    all.push((file.label.clone(), msg, report));
+                }
+            }
+        }
+        if all.is_empty() {
+            return Err("no parsable messages to display".into());
+        }
+        tui::run(all).map_err(|e| e.to_string())?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.json {
+        return emit_json(&files, cli.strict);
+    }
+
     let mut out = Output::stdout();
     let verdict = write_files(&files, &options, cli.quiet, &mut out)
         .and_then(|v| out.finish().map(|()| v))
@@ -426,55 +425,6 @@ fn scan_file(input: Input, only: Option<usize>) -> Result<ScannedFile, String> {
     })
 }
 
-struct ParsedFile {
-    label: String,
-    messages: Vec<(Message, Report)>,
-    errors: Vec<String>,
-    notes: Vec<String>,
-}
-
-fn parse_file(input: &Input, only: Option<usize>) -> Result<ParsedFile, String> {
-    let (raws, notes) = parser::split_messages(&input.text);
-    if raws.is_empty() {
-        return Err(format!(
-            "{}: no MSH segment found - is this an HL7 v2 message?",
-            input.label
-        ));
-    }
-    let mut messages = Vec::new();
-    let mut errors = Vec::new();
-    for (i, raw) in raws.iter().enumerate() {
-        if let Some(n) = only {
-            if i + 1 != n {
-                continue;
-            }
-        }
-        match parser::parse_message(raw) {
-            Ok(msg) => {
-                let report = validate::validate(&msg);
-                messages.push((msg, report));
-            }
-            Err(e) => errors.push(format!("{}: {}", input.label, e)),
-        }
-    }
-    if let Some(n) = only {
-        if messages.is_empty() && errors.is_empty() {
-            return Err(format!(
-                "{}: message {} requested but the file holds {}",
-                input.label,
-                n,
-                raws.len()
-            ));
-        }
-    }
-    Ok(ParsedFile {
-        label: input.label.clone(),
-        messages,
-        errors,
-        notes,
-    })
-}
-
 fn read_inputs(cli: &Cli) -> Result<Vec<Input>, String> {
     let use_stdin = cli.files.is_empty() || cli.files.iter().any(|f| f.as_os_str() == "-");
     if cli.files.is_empty() && io::stdin().is_terminal() {
@@ -584,15 +534,21 @@ fn parse_field_path(spec_str: &str) -> Result<FieldPath, String> {
 }
 
 fn query_field(
-    files: &[ParsedFile],
+    files: &[ScannedFile],
     path_str: &str,
     o: &render::Options,
 ) -> Result<ExitCode, String> {
     let path = parse_field_path(path_str)?;
     let mut found = false;
-    let multi = files.len() > 1 || files.iter().map(|f| f.messages.len()).sum::<usize>() > 1;
+    let multi = files.len() > 1 || files.iter().map(|f| f.message_count).sum::<usize>() > 1;
+    let mut out = Output::stdout();
     for file in files {
-        for (i, (msg, _)) in file.messages.iter().enumerate() {
+        let mut i = 0usize;
+        for raw in file.selected() {
+            let Ok(msg) = parser::parse_message(raw) else {
+                continue;
+            };
+            i += 1;
             let seg = msg
                 .segments
                 .iter()
@@ -615,17 +571,16 @@ fn query_field(
                 };
                 let value = parser::unescape(&value, &msg.sep);
                 found = true;
-                if multi {
-                    println!(
-                        "{}",
-                        o.paint.dim(&format!("{}#{}", file.label, i + 1)) + "\t" + &value
-                    );
+                let line = if multi {
+                    o.paint.dim(&format!("{}#{}", file.label, i)) + "\t" + &value
                 } else {
-                    println!("{value}");
-                }
+                    value
+                };
+                writeln!(out, "{line}").map_err(|e| format!("stdout: {e}"))?;
             }
         }
     }
+    out.finish().map_err(|e| format!("stdout: {e}"))?;
     if !found {
         return Ok(ExitCode::from(1));
     }
@@ -634,42 +589,106 @@ fn query_field(
 
 // ------------------------------------------------------------------ json output
 
-fn emit_json(files: &[ParsedFile], strict: bool) -> Result<ExitCode, String> {
-    let mut worst: Option<Severity> = None;
-    let mut failures = 0usize;
-    let mut out_files = Vec::new();
+/// Serialises the report without ever holding more than one message's JSON.
+/// Messages are parsed and validated as the serialiser walks them; the tallies
+/// the trailing `status` needs are complete by the time it is written, because
+/// `serde_json` emits map keys in alphabetical order and `status` sorts after
+/// `files`.
+struct Document<'a> {
+    files: &'a [ScannedFile],
+    parse_failures: usize,
+    worst: Cell<Option<Severity>>,
+}
 
-    for file in files {
-        failures += file.errors.len();
-        let mut msgs = Vec::new();
-        for (msg, report) in &file.messages {
-            worst = worst.max(report.worst());
-            msgs.push(message_json(msg, report));
-        }
-        out_files.push(serde_json::json!({
-            "file": file.label,
-            "notes": file.notes,
-            "parse_errors": file.errors,
-            "messages": msgs,
-        }));
-    }
-
-    let doc = serde_json::json!({
-        "tool": "hl7probe",
-        "version": env!("CARGO_PKG_VERSION"),
-        "files": out_files,
-        "status": match worst {
+impl Document<'_> {
+    const fn status(&self) -> &'static str {
+        match self.worst.get() {
             Some(Severity::Error) => "error",
             Some(Severity::Warning) => "warning",
-            _ if failures > 0 => "error",
+            _ if self.parse_failures > 0 => "error",
             _ => "ok",
-        },
-    });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?
-    );
-    Ok(exit_code(worst, failures, strict))
+        }
+    }
+}
+
+impl Serialize for Document<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry("files", &Files(self))?;
+        map.serialize_entry("status", self.status())?;
+        map.serialize_entry("tool", "hl7probe")?;
+        map.serialize_entry("version", env!("CARGO_PKG_VERSION"))?;
+        map.end()
+    }
+}
+
+struct Files<'a>(&'a Document<'a>);
+
+impl Serialize for Files<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.0.files.len()))?;
+        for file in self.0.files {
+            seq.serialize_element(&FileEntry { doc: self.0, file })?;
+        }
+        seq.end()
+    }
+}
+
+struct FileEntry<'a> {
+    doc: &'a Document<'a>,
+    file: &'a ScannedFile,
+}
+
+impl Serialize for FileEntry<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry("file", &self.file.label)?;
+        map.serialize_entry(
+            "messages",
+            &Messages {
+                doc: self.doc,
+                file: self.file,
+            },
+        )?;
+        map.serialize_entry("notes", &self.file.notes)?;
+        map.serialize_entry("parse_errors", &self.file.errors)?;
+        map.end()
+    }
+}
+
+struct Messages<'a> {
+    doc: &'a Document<'a>,
+    file: &'a ScannedFile,
+}
+
+impl Serialize for Messages<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.file.message_count))?;
+        for raw in self.file.selected() {
+            let Ok(msg) = parser::parse_message(raw) else {
+                continue; // Counted as a parse error by the scan.
+            };
+            let report = validate::validate(&msg);
+            self.doc.worst.set(self.doc.worst.get().max(report.worst()));
+            seq.serialize_element(&message_json(&msg, &report))?;
+        }
+        seq.end()
+    }
+}
+
+fn emit_json(files: &[ScannedFile], strict: bool) -> Result<ExitCode, String> {
+    let doc = Document {
+        files,
+        parse_failures: files.iter().map(|f| f.errors.len()).sum(),
+        worst: Cell::new(None),
+    };
+    let mut out = Output::stdout();
+    let mut serializer = serde_json::Serializer::pretty(&mut out);
+    doc.serialize(&mut serializer)
+        .map_err(|e| format!("stdout: {e}"))?;
+    writeln!(out).map_err(|e| format!("stdout: {e}"))?;
+    out.finish().map_err(|e| format!("stdout: {e}"))?;
+    Ok(exit_code(doc.worst.get(), doc.parse_failures, strict))
 }
 
 fn message_json(msg: &Message, report: &Report) -> serde_json::Value {
