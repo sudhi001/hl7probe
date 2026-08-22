@@ -98,7 +98,7 @@ Check it works:
 
 ```console
 $ hl7probe --version
-hl7probe 0.3.0
+hl7probe 0.3.1
 ```
 
 None of the commands above pin a version: they each fetch the current release,

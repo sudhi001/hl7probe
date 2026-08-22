@@ -7,6 +7,18 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-22
+
+### Documentation
+
+- The install section shows what `hl7probe --version` prints, so the page says
+  which release it describes. The install commands themselves are unchanged and
+  still pin nothing: Homebrew, the releases page and `cargo install` each fetch
+  the current version.
+- 0.3.0 was tagged before that change, so its packaged README predates it. This
+  release exists to carry it into the crate and the source tarball; there is no
+  change to the tool itself.
+
 ## [0.3.0] - 2026-08-22
 
 ### Changed
@@ -178,7 +190,8 @@ First release.
   (`--quiet`), segment filters (`--segment`) and `--strict` exit codes.
 - Homebrew formula and prebuilt binaries for macOS and Linux.
 
-[Unreleased]: https://github.com/sudhi001/hl7probe/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sudhi001/hl7probe/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/sudhi001/hl7probe/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sudhi001/hl7probe/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/sudhi001/hl7probe/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sudhi001/hl7probe/compare/v0.2.0...v0.2.1
