@@ -337,9 +337,10 @@ Real-world message files are messy. `hl7probe` copes with:
 
 ## Performance
 
-Messages are parsed, written and dropped one at a time, so peak memory follows
-the largest message rather than the size of the file. A batch file is only ever
-read once into memory; nothing accumulates as it is reported.
+A batch file is read into memory once and never copied. Messages are parsed,
+written and dropped one at a time, and a parsed message is a set of views over
+the file text rather than an owned tree, so peak memory is close to the size of
+the input regardless of which output mode you ask for.
 
 Measured on an Apple M4 (macOS 26.6, rustc 1.97.1, `--release`), best of five
 runs, against a file of 50,000 copies of `examples/adt_a01.hl7` — 26 MB, or
@@ -347,25 +348,30 @@ about 300,000 segments:
 
 | Command | Time | Peak memory |
 | --- | --- | --- |
-| `hl7probe -q` (validate only) | 1.25s | 129 MB |
-| `hl7probe -f PID-5.1` (one field per message) | 0.57s | 129 MB |
-| `hl7probe` (full report) | 3.50s | 129 MB |
-| `hl7probe --json` | 6.51s | 129 MB |
+| `hl7probe -q` (validate only) | 1.04s | 33 MB |
+| `hl7probe -f PID-5.1` (one field per message) | 0.14s | 33 MB |
+| `hl7probe` (full report) | 3.08s | 34 MB |
+| `hl7probe --json` | 6.03s | 34 MB |
 
-At the sizes most runs actually are, this hardly matters: a single message
-reports in about 4 ms end to end — most of that being process startup — using
-2.4 MB, and 5,000 messages (2.6 MB) validate in 0.13s using 16 MB.
+That is about 1.3x the file, and most of it is the file. At the sizes most
+runs actually are, none of this matters: a single message reports in about
+4 ms end to end — most of that being process startup — using 2.3 MB, and
+5,000 messages (2.6 MB) validate in 0.11s using 5.7 MB.
 
-Memory is flat across output modes because none of them hold more than one
-parsed message. Before that was true, the same 26 MB file cost 2.2 GB to
-validate and 4.6 GB to render as JSON:
+Memory used to scale with the batch rather than the message, because every
+message was parsed up front and every field, component and subcomponent became
+its own `String`:
 
 | Command | Peak memory before | After |
 | --- | --- | --- |
-| `hl7probe -q` | 2,234 MB | 129 MB |
-| `hl7probe -f PID-5.1` | 2,234 MB | 129 MB |
-| `hl7probe` | 2,417 MB | 129 MB |
-| `hl7probe --json` | 4,598 MB | 129 MB |
+| `hl7probe -q` | 2,234 MB | 33 MB |
+| `hl7probe -f PID-5.1` | 2,234 MB | 33 MB |
+| `hl7probe` | 2,417 MB | 34 MB |
+| `hl7probe --json` | 4,598 MB | 34 MB |
+
+A parsed message costs 2.4 KB and 35 allocations, down from 40 KB and 482. That
+is what the interactive viewer pays per message, since it has to hold the whole
+batch to let you page back and forth.
 
 To reproduce:
 
@@ -374,10 +380,6 @@ python3 -c "open('bulk.hl7','wb').write(open('examples/adt_a01.hl7','rb').read()
 cargo build --release
 /usr/bin/time -l ./target/release/hl7probe -q bulk.hl7   # macOS; use -v on Linux
 ```
-
-The interactive viewer is the exception: it has to hold every message so you
-can page back and forth, so `--tui` over a large batch stays proportional to
-the file.
 
 ## Building from source
 

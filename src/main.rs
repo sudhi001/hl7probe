@@ -162,7 +162,7 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
         return query_field(&files, path, &options);
     }
     if cli.tui {
-        let mut all: Vec<(String, Message, Report)> = Vec::new();
+        let mut all: Vec<(String, Message<'_>, Report)> = Vec::new();
         for file in &files {
             for raw in file.selected() {
                 if let Ok(msg) = parser::parse_message(raw) {
@@ -272,7 +272,7 @@ fn write_files(
 /// verdict.
 fn quiet_line(
     file: &ScannedFile<'_>,
-    msg: &Message,
+    msg: &Message<'_>,
     report: &Report,
     index: usize,
     o: &render::Options,
@@ -559,16 +559,16 @@ fn query_field(
             };
             let reps: Vec<usize> = match path.repetition {
                 Some(r) => vec![r],
-                None => (1..=field.reps.len()).collect(),
+                None => (1..=field.rep_count()).collect(),
             };
             for r in reps {
                 let rep = field.rep(r);
                 let value = match (path.component, path.subcomponent) {
-                    (None, _) => rep.raw(&msg.sep),
-                    (Some(c), None) => rep.comp_text(c, &msg.sep),
-                    (Some(c), Some(s)) => rep.comp(c).sub(s).to_string(),
+                    (None, _) => rep.text(),
+                    (Some(c), None) => rep.comp_text(c),
+                    (Some(c), Some(s)) => rep.comp(c).sub(s),
                 };
-                let value = parser::unescape(&value, &msg.sep);
+                let value = parser::unescape(value, &msg.sep);
                 found = true;
                 let line = if multi {
                     o.paint.dim(&format!("{}#{}", file.label, i)) + "\t" + &value
@@ -690,7 +690,7 @@ fn emit_json(files: &[ScannedFile<'_>], strict: bool) -> Result<ExitCode, String
     Ok(exit_code(doc.worst.get(), doc.parse_failures, strict))
 }
 
-fn message_json(msg: &Message, report: &Report) -> serde_json::Value {
+fn message_json(msg: &Message<'_>, report: &Report) -> serde_json::Value {
     let sep = &msg.sep;
     let (code, trigger, structure) = msg.message_type();
     let segments: Vec<serde_json::Value> = msg
@@ -704,17 +704,17 @@ fn message_json(msg: &Message, report: &Report) -> serde_json::Value {
                     let field = seg.field(s)?;
                     Some(serde_json::json!({
                         "seq": s,
-                        "name": spec::field_label(&seg.name, s),
-                        "value": parser::unescape(&field.raw(sep), sep),
-                        "repetitions": field.reps.iter().map(|r| {
-                            r.comps.iter().map(|c| c.subs.clone()).collect::<Vec<_>>()
+                        "name": spec::field_label(seg.name, s),
+                        "value": parser::unescape(field.text(), sep),
+                        "repetitions": field.reps().map(|r| {
+                            r.comps().map(|c| c.subs().collect::<Vec<_>>()).collect::<Vec<_>>()
                         }).collect::<Vec<_>>(),
                     }))
                 })
                 .collect();
             serde_json::json!({
                 "name": seg.name,
-                "description": spec::segment_desc(&seg.name),
+                "description": spec::segment_desc(seg.name),
                 "occurrence": seg.occurrence,
                 "line": seg.line,
                 "severity": report.segment_severity(i, true).map(Severity::label),

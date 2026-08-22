@@ -88,7 +88,7 @@ impl Finding {
             detail: detail.into(),
         }
     }
-    const fn at(mut self, seg: &Segment, index: usize) -> Self {
+    const fn at(mut self, seg: &Segment<'_>, index: usize) -> Self {
         self.line = seg.line;
         self.segment_index = Some(index);
         self
@@ -134,7 +134,7 @@ impl Report {
     }
 }
 
-pub fn validate(msg: &Message) -> Report {
+pub fn validate(msg: &Message<'_>) -> Report {
     let mut findings: Vec<Finding> = Vec::new();
     for rule in RULES {
         rule.check(msg, &mut findings);
@@ -151,7 +151,7 @@ pub fn validate(msg: &Message) -> Report {
     let (code, trigger, _) = msg.message_type();
     Report {
         findings,
-        structure: spec::message_spec(&code, &trigger),
+        structure: spec::message_spec(code, trigger),
     }
 }
 
@@ -164,7 +164,7 @@ const MSH_INDEX: usize = 0;
 /// Rules never see each other: a new check is a new implementation added to
 /// `RULES`, not an edit to an existing pass.
 trait Rule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>);
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>);
 }
 
 /// Every rule applied to a message, in the order their findings are produced.
@@ -184,22 +184,22 @@ const RULES: &[&dyn Rule] = &[
 /// One populated repetition of a field the dictionary defines, which is the
 /// unit both value-level rules work on.
 struct FieldRepetition<'a> {
-    seg: &'a Segment,
+    seg: &'a Segment<'a>,
     seg_index: usize,
     spec: &'a spec::FieldSpec,
-    rep: &'a Repetition,
+    rep: Repetition<'a>,
     /// `PID-3`, or `PID-3[2]` when the field repeats.
     location: String,
 }
 
 /// Walks every populated repetition of every defined field, skipping
 /// site-defined segments and HL7 explicit nulls.
-fn visit_repetitions(msg: &Message, mut visit: impl FnMut(FieldRepetition<'_>)) {
+fn visit_repetitions(msg: &Message<'_>, mut visit: impl FnMut(FieldRepetition<'_>)) {
     for (seg_index, seg) in msg.segments.iter().enumerate() {
         if seg.is_custom() {
             continue;
         }
-        let Some(segment_spec) = spec::segment_spec(&seg.name) else {
+        let Some(segment_spec) = spec::segment_spec(seg.name) else {
             continue;
         };
         for field_spec in segment_spec.fields {
@@ -210,7 +210,7 @@ fn visit_repetitions(msg: &Message, mut visit: impl FnMut(FieldRepetition<'_>)) 
                 continue;
             }
             let location = format!("{}-{}", seg.name, field_spec.seq);
-            for (index, rep) in field.reps.iter().enumerate() {
+            for (index, rep) in field.reps().enumerate() {
                 if rep.is_empty() {
                     continue;
                 }
@@ -219,7 +219,7 @@ fn visit_repetitions(msg: &Message, mut visit: impl FnMut(FieldRepetition<'_>)) 
                     seg_index,
                     spec: field_spec,
                     rep,
-                    location: if field.reps.len() > 1 {
+                    location: if field.rep_count() > 1 {
                         format!("{}[{}]", location, index + 1)
                     } else {
                         location.clone()
@@ -237,15 +237,15 @@ fn visit_repetitions(msg: &Message, mut visit: impl FnMut(FieldRepetition<'_>)) 
 struct StructureRule;
 
 impl Rule for StructureRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         let (code, trigger, structure_id) = msg.message_type();
-        let structure = spec::message_spec(&code, &trigger);
-        check_structure(msg, &code, &trigger, &structure_id, structure, out);
+        let structure = spec::message_spec(code, trigger);
+        check_structure(msg, code, trigger, structure_id, structure, out);
     }
 }
 
 fn check_structure(
-    msg: &Message,
+    msg: &Message<'_>,
     code: &str,
     trigger: &str,
     structure_id: &str,
@@ -331,7 +331,7 @@ fn check_structure(
             .map(|(i, _)| i)
             .collect();
         if slots.is_empty() {
-            let known = spec::segment_desc(&seg.name).is_some();
+            let known = spec::segment_desc(seg.name).is_some();
             let (sev, detail) = if known {
                 (
                     Severity::Warning,
@@ -347,7 +347,7 @@ fn check_structure(
                 Finding::new(
                     sev,
                     Category::Structure,
-                    seg.name.clone(),
+                    seg.name,
                     "unexpected segment",
                     detail,
                 )
@@ -363,7 +363,7 @@ fn check_structure(
                     Finding::new(
                         Severity::Warning,
                         Category::Structure,
-                        seg.name.clone(),
+                        seg.name,
                         "segment appears out of order",
                         format!(
                             "{} expects {} earlier in the message",
@@ -394,7 +394,7 @@ fn check_structure(
 struct FieldUsageRule;
 
 impl Rule for FieldUsageRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         for (index, seg) in msg.segments.iter().enumerate() {
             check_segment_fields(seg, index, out);
         }
@@ -405,7 +405,7 @@ impl Rule for FieldUsageRule {
 struct ValueTypeRule;
 
 impl Rule for ValueTypeRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         visit_repetitions(msg, |field| {
             check_datatype(
                 field.spec,
@@ -413,7 +413,6 @@ impl Rule for ValueTypeRule {
                 &field.location,
                 field.seg,
                 field.seg_index,
-                &msg.sep,
                 out,
             );
         });
@@ -424,14 +423,14 @@ impl Rule for ValueTypeRule {
 struct CodeTableRule;
 
 impl Rule for CodeTableRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         visit_repetitions(msg, |field| {
             let Some(table_id) = field.spec.table else {
                 return;
             };
             check_table(
                 table_id,
-                &field.rep.comp_text(1, &msg.sep),
+                field.rep.comp_text(1),
                 &field.location,
                 field.spec.name,
                 field.seg,
@@ -442,11 +441,11 @@ impl Rule for CodeTableRule {
     }
 }
 
-fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
+fn check_segment_fields(seg: &Segment<'_>, index: usize, out: &mut Vec<Finding>) {
     if seg.is_custom() {
         return;
     }
-    let Some(sspec) = spec::segment_spec(&seg.name) else {
+    let Some(sspec) = spec::segment_spec(seg.name) else {
         return;
     };
     let max_defined = sspec.fields.iter().map(|f| f.seq).max().unwrap_or(0);
@@ -502,7 +501,7 @@ fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
                 .at(seg, index),
             );
         }
-        if !fs.repeats && field.reps.len() > 1 {
+        if !fs.repeats && field.rep_count() > 1 {
             out.push(
                 Finding::new(
                     Severity::Warning,
@@ -511,7 +510,7 @@ fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
                     "repeats but is defined as non-repeating",
                     format!(
                         "{} repetitions found in a single-value field",
-                        field.reps.len()
+                        field.rep_count()
                     ),
                 )
                 .at(seg, index),
@@ -520,8 +519,8 @@ fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
 
         // Value-level checks belong to ValueTypeRule and CodeTableRule; this
         // rule only reports repetitions that carry nothing at all.
-        if field.reps.len() > 1 {
-            for (ri, rep) in field.reps.iter().enumerate() {
+        if field.rep_count() > 1 {
+            for (ri, rep) in field.reps().enumerate() {
                 if rep.is_empty() {
                     out.push(
                         Finding::new(
@@ -563,14 +562,13 @@ fn check_segment_fields(seg: &Segment, index: usize, out: &mut Vec<Finding>) {
 #[allow(clippy::collapsible_match)]
 fn check_datatype(
     fs: &spec::FieldSpec,
-    rep: &Repetition,
+    rep: Repetition<'_>,
     loc: &str,
-    seg: &Segment,
+    seg: &Segment<'_>,
     index: usize,
-    sep: &crate::parser::Separators,
     out: &mut Vec<Finding>,
 ) {
-    let c1 = rep.comp_text(1, sep);
+    let c1 = rep.comp_text(1);
     let mut bad = |summary: String, detail: String| {
         out.push(
             Finding::new(
@@ -586,17 +584,17 @@ fn check_datatype(
 
     match fs.dt {
         "DTM" | "TS" => {
-            if let Err(e) = datetime::parse_ts(&c1) {
+            if let Err(e) = datetime::parse_ts(c1) {
                 bad("not a valid date/time".to_string(), e);
             }
         }
         "DT" => {
-            if let Err(e) = datetime::parse_date(&c1) {
+            if let Err(e) = datetime::parse_date(c1) {
                 bad("not a valid date".to_string(), e);
             }
         }
         "TM" => {
-            if let Err(e) = datetime::parse_time(&c1) {
+            if let Err(e) = datetime::parse_time(c1) {
                 bad("not a valid time".to_string(), e);
             }
         }
@@ -632,15 +630,11 @@ fn check_datatype(
             }
         }
         "XPN" | "XCN" => {
-            let family = if fs.dt == "XCN" {
-                rep.comp_text(2, sep)
-            } else {
-                c1.clone()
-            };
+            let family = if fs.dt == "XCN" { rep.comp_text(2) } else { c1 };
             let given = if fs.dt == "XCN" {
-                rep.comp_text(3, sep)
+                rep.comp_text(3)
             } else {
-                rep.comp_text(2, sep)
+                rep.comp_text(2)
             };
             if family.is_empty() && !given.is_empty() {
                 out.push(
@@ -676,7 +670,7 @@ fn check_datatype(
                     "component 1 (point of care) is empty while later components are populated"
                         .to_string(),
                 );
-            } else if !rep.comp_text(3, sep).is_empty() && rep.comp_text(2, sep).is_empty() {
+            } else if !rep.comp_text(3).is_empty() && rep.comp_text(2).is_empty() {
                 out.push(
                     Finding::new(
                         Severity::Warning,
@@ -690,7 +684,7 @@ fn check_datatype(
             }
         }
         "MSG" => {
-            if rep.comp_text(2, sep).is_empty() {
+            if rep.comp_text(2).is_empty() {
                 out.push(
                     Finding::new(
                         Severity::Warning,
@@ -704,7 +698,7 @@ fn check_datatype(
             }
         }
         "VID" => {
-            if !spec::is_known_version(&c1) {
+            if !spec::is_known_version(c1) {
                 bad(
                     "not a known HL7 version".to_string(),
                     format!("{c1:?} is not listed in HL7 table 0104"),
@@ -712,7 +706,7 @@ fn check_datatype(
             }
         }
         "CE" | "CWE" => {
-            if !c1.is_empty() && rep.comp_text(3, sep).is_empty() && fs.table.is_none() {
+            if !c1.is_empty() && rep.comp_text(3).is_empty() && fs.table.is_none() {
                 out.push(
                     Finding::new(
                         Severity::Info,
@@ -734,7 +728,7 @@ fn check_table(
     value: &str,
     loc: &str,
     field_name: &str,
-    seg: &Segment,
+    seg: &Segment<'_>,
     index: usize,
     out: &mut Vec<Finding>,
 ) {
@@ -782,8 +776,7 @@ fn check_table(
 struct MessageHeaderRule;
 
 impl Rule for MessageHeaderRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
-        let sep = &msg.sep;
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         let (ty, tm, td) = datetime::today();
         let msh = msg.msh();
         let control = msg.control_id();
@@ -803,7 +796,7 @@ impl Rule for MessageHeaderRule {
             );
         }
 
-        if let Ok(ts) = datetime::parse_ts(&msh.comp(7, 1, sep)) {
+        if let Ok(ts) = datetime::parse_ts(msh.comp(7, 1)) {
             if ts.days_after(ty, tm, td) > 1 {
                 out.push(
                     Finding::new(
@@ -831,7 +824,7 @@ impl Rule for MessageHeaderRule {
         }
 
         // Non-ASCII payload without a declared character set is a classic interface bug.
-        if msh.comp(18, 1, sep).is_empty() && msg.segments.iter().any(|s| !s.raw.is_ascii()) {
+        if msh.comp(18, 1).is_empty() && msg.segments.iter().any(|s| !s.raw.is_ascii()) {
             out.push(
                 Finding::new(
                     Severity::Warning,
@@ -850,8 +843,7 @@ impl Rule for MessageHeaderRule {
 struct EventRule;
 
 impl Rule for EventRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
-        let sep = &msg.sep;
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         let (_, trigger, _) = msg.message_type();
         if let Some((i, evn)) = msg
             .segments
@@ -859,7 +851,7 @@ impl Rule for EventRule {
             .enumerate()
             .find(|(_, s)| s.name == "EVN")
         {
-            let evn_type = evn.comp(1, 1, sep);
+            let evn_type = evn.comp(1, 1);
             if !evn_type.is_empty() && !trigger.is_empty() && evn_type != trigger {
                 out.push(
                     Finding::new(
@@ -873,8 +865,8 @@ impl Rule for EventRule {
                 );
             }
             if let (Ok(recorded), Ok(occurred)) = (
-                datetime::parse_ts(&evn.comp(2, 1, sep)),
-                datetime::parse_ts(&evn.comp(6, 1, sep)),
+                datetime::parse_ts(evn.comp(2, 1)),
+                datetime::parse_ts(evn.comp(6, 1)),
             ) {
                 if recorded.days_after(occurred.year, occurred.month, occurred.day) < 0 {
                     out.push(
@@ -901,8 +893,7 @@ impl Rule for EventRule {
 struct PatientRule;
 
 impl Rule for PatientRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
-        let sep = &msg.sep;
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         let (ty, tm, td) = datetime::today();
         if let Some((i, pid)) = msg
             .segments
@@ -910,7 +901,7 @@ impl Rule for PatientRule {
             .enumerate()
             .find(|(_, s)| s.name == "PID")
         {
-            if let Ok(dob) = datetime::parse_ts(&pid.comp(7, 1, sep)) {
+            if let Ok(dob) = datetime::parse_ts(pid.comp(7, 1)) {
                 if dob.days_after(ty, tm, td) > 0 {
                     out.push(
                         Finding::new(
@@ -935,8 +926,8 @@ impl Rule for PatientRule {
                     );
                 }
             }
-            let death_date = pid.comp(29, 1, sep);
-            let death_flag = pid.comp(30, 1, sep);
+            let death_date = pid.comp(29, 1);
+            let death_flag = pid.comp(30, 1);
             if !death_date.is_empty() && death_flag != "Y" {
                 out.push(
                     Finding::new(
@@ -964,9 +955,8 @@ impl Rule for PatientRule {
             // Duplicate identifiers in PID-3 confuse downstream matching.
             if let Some(field) = pid.field(3) {
                 let ids: Vec<String> = field
-                    .reps
-                    .iter()
-                    .map(|r| format!("{}|{}", r.comp_text(1, sep), r.comp_text(4, sep)))
+                    .reps()
+                    .map(|r| format!("{}|{}", r.comp_text(1), r.comp_text(4)))
                     .collect();
                 for (n, id) in ids.iter().enumerate() {
                     if !id.starts_with('|') && ids[..n].contains(id) {
@@ -992,8 +982,7 @@ impl Rule for PatientRule {
 struct VisitRule;
 
 impl Rule for VisitRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
-        let sep = &msg.sep;
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         let (code, trigger, _) = msg.message_type();
         if let Some((i, pv1)) = msg
             .segments
@@ -1001,8 +990,8 @@ impl Rule for VisitRule {
             .enumerate()
             .find(|(_, s)| s.name == "PV1")
         {
-            let class = pv1.comp(2, 1, sep);
-            if matches!(class.as_str(), "I" | "E" | "B") && !pv1.has(3) {
+            let class = pv1.comp(2, 1);
+            if matches!(class, "I" | "E" | "B") && !pv1.has(3) {
                 out.push(
                     Finding::new(
                         Severity::Error,
@@ -1012,14 +1001,14 @@ impl Rule for VisitRule {
                         format!(
                             "patient class {:?} ({}) requires a location in PV1-3",
                             class,
-                            spec::code_meaning("0004", &class).unwrap_or("unknown class")
+                            spec::code_meaning("0004", class).unwrap_or("unknown class")
                         ),
                     )
                     .at(pv1, i),
                 );
             }
-            let admit = datetime::parse_ts(&pv1.comp(44, 1, sep));
-            let discharge = datetime::parse_ts(&pv1.comp(45, 1, sep));
+            let admit = datetime::parse_ts(pv1.comp(44, 1));
+            let discharge = datetime::parse_ts(pv1.comp(45, 1));
             if let (Ok(a), Ok(d)) = (&admit, &discharge) {
                 if d.days_after(a.year, a.month, a.day) < 0 {
                     out.push(
@@ -1054,16 +1043,15 @@ impl Rule for VisitRule {
 struct ObservationRule;
 
 impl Rule for ObservationRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
-        let sep = &msg.sep;
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         for (i, obx) in msg
             .segments
             .iter()
             .enumerate()
             .filter(|(_, s)| s.name == "OBX")
         {
-            let vt = obx.comp(2, 1, sep);
-            let value = obx.text(5, sep);
+            let vt = obx.comp(2, 1);
+            let value = obx.text(5);
             if vt.is_empty() && !value.is_empty() {
                 out.push(
                     Finding::new(
@@ -1080,18 +1068,18 @@ impl Rule for ObservationRule {
             if value.is_empty() {
                 continue;
             }
-            let first = obx.comp(5, 1, sep);
-            let mismatch = match vt.as_str() {
+            let first = obx.comp(5, 1);
+            let mismatch = match vt {
                 "NM" => first
                     .parse::<f64>()
                     .is_err()
                     .then(|| "not a number".to_string()),
-                "DT" => datetime::parse_date(&first).err(),
-                "TS" | "DTM" => datetime::parse_ts(&first).err(),
-                "TM" => datetime::parse_time(&first).err(),
+                "DT" => datetime::parse_date(first).err(),
+                "TS" | "DTM" => datetime::parse_ts(first).err(),
+                "TM" => datetime::parse_time(first).err(),
                 "SN" => {
                     // Structured numeric: <comparator><num1><sep><num2>
-                    let num = obx.comp(5, 2, sep);
+                    let num = obx.comp(5, 2);
                     (!num.is_empty() && num.parse::<f64>().is_err())
                         .then(|| "component 2 is not a number".to_string())
                 }
@@ -1117,31 +1105,30 @@ impl Rule for ObservationRule {
 struct SetIdRule;
 
 impl Rule for SetIdRule {
-    fn check(&self, msg: &Message, out: &mut Vec<Finding>) {
+    fn check(&self, msg: &Message<'_>, out: &mut Vec<Finding>) {
         check_set_ids(msg, out);
     }
 }
 
 /// Repeating segments carry a 1-based Set ID in field 1; gaps and repeats there
 /// break receivers that key on it.
-fn check_set_ids(msg: &Message, out: &mut Vec<Finding>) {
+fn check_set_ids(msg: &Message<'_>, out: &mut Vec<Finding>) {
     const SET_ID_SEGMENTS: &[&str] = &[
         "NK1", "AL1", "DG1", "PR1", "GT1", "IN1", "OBX", "FT1", "IAM", "RGS", "AIS", "AIL", "AIP",
         "NTE",
     ];
-    let sep = &msg.sep;
     for name in SET_ID_SEGMENTS {
-        let occurrences: Vec<(usize, &Segment)> = msg
+        let occurrences: Vec<(usize, &Segment<'_>)> = msg
             .segments
             .iter()
             .enumerate()
-            .filter(|(_, s)| &s.name.as_str() == name)
+            .filter(|(_, s)| s.name == *name)
             .collect();
         if occurrences.len() < 2 {
             continue;
         }
         for (n, (i, seg)) in occurrences.iter().enumerate() {
-            let raw = seg.comp(1, 1, sep);
+            let raw = seg.comp(1, 1);
             if raw.is_empty() {
                 continue;
             }
@@ -1254,7 +1241,8 @@ PID|1||123456^^^MERCY^MR||Smith^John||19850312|M|||1 Oak St^^Springfield^IL^6270
 
     #[test]
     fn validate_collects_from_every_rule() {
-        let msg = parse_str(&adt(&[]));
+        let text = adt(&[]);
+        let msg = parse_str(&text);
         let combined = validate(&msg).findings.len();
         let separate: usize = RULES
             .iter()
@@ -1471,9 +1459,10 @@ PID|1||1^^^A^MR||Smith^John||19850312|M|||1 St^^X^IL^1\rPV1|1|I|ER^101|||1^A^B||
 
     #[test]
     fn severity_rolls_up_per_segment_and_message() {
-        let msg = parse_str(&format!(
+        let text = format!(
             "{HEADER}EVN|A01|20240115143200\rPID|1||1^^^A^MR||Smith^John||19850332|M|||1 St^^X^IL^1\rPV1|1|I|ER^101|||1^A^B||||||||||V1\r"
-        ));
+        );
+        let msg = parse_str(&text);
         let r = validate(&msg);
         let pid = msg.segments.iter().position(|s| s.name == "PID").unwrap();
         assert_eq!(r.segment_severity(pid, false), Some(Severity::Error));

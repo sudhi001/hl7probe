@@ -119,131 +119,189 @@ impl fmt::Display for ParseError {
 }
 
 /// A single component, itself made of `&`-delimited subcomponents.
-#[derive(Debug, Clone)]
-pub struct Component {
-    pub subs: Vec<String>,
+///
+/// This and its siblings are views over the segment line, not owned trees: a
+/// field carries the text it occupied and splits it when asked. HL7 leaves are
+/// two or three characters on average, so building a `Vec<String>` for each one
+/// cost far more than the text it held.
+#[derive(Debug, Clone, Copy)]
+pub struct Component<'a> {
+    raw: &'a str,
+    sep: Separators,
+    /// MSH-1 and MSH-2 are the delimiters themselves and must never be split.
+    literal: bool,
 }
 
-impl Component {
-    pub fn sub(&self, seq: usize) -> &str {
-        self.subs
-            .get(seq.wrapping_sub(1))
-            .map_or("", String::as_str)
+impl<'a> Component<'a> {
+    pub fn sub(&self, seq: usize) -> &'a str {
+        self.subs().nth(seq.wrapping_sub(1)).unwrap_or("")
     }
+
+    pub fn subs(&self) -> impl Iterator<Item = &'a str> {
+        split(self.raw, self.sep.subcomponent, self.literal)
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.subs.iter().all(String::is_empty)
-    }
-    fn raw(&self, sep: &Separators) -> String {
-        self.subs.join(&sep.subcomponent.to_string())
+        if self.literal {
+            return self.raw.is_empty();
+        }
+        self.raw.chars().all(|c| c == self.sep.subcomponent)
     }
 }
 
 /// One repetition of a field (`~`-delimited at the field level).
-#[derive(Debug, Clone)]
-pub struct Repetition {
-    pub comps: Vec<Component>,
+#[derive(Debug, Clone, Copy)]
+pub struct Repetition<'a> {
+    raw: &'a str,
+    sep: Separators,
+    literal: bool,
 }
 
-impl Repetition {
-    pub fn comp(&self, seq: usize) -> &Component {
-        const EMPTY: &Component = &Component { subs: Vec::new() };
-        self.comps.get(seq.wrapping_sub(1)).unwrap_or(EMPTY)
+impl<'a> Repetition<'a> {
+    pub fn comp(&self, seq: usize) -> Component<'a> {
+        Component {
+            raw: self.comp_text(seq),
+            sep: self.sep,
+            literal: self.literal,
+        }
     }
-    /// Component `seq` rendered as text (subcomponents rejoined).
-    pub fn comp_text(&self, seq: usize, sep: &Separators) -> String {
-        self.comp(seq).raw(sep)
+
+    pub fn comps(&self) -> impl Iterator<Item = Component<'a>> {
+        let (sep, literal) = (self.sep, self.literal);
+        split(self.raw, self.sep.component, self.literal).map(move |raw| Component {
+            raw,
+            sep,
+            literal,
+        })
     }
+
+    /// Component `seq` as text, or `""` when the repetition has no such
+    /// component.
+    pub fn comp_text(&self, seq: usize) -> &'a str {
+        split(self.raw, self.sep.component, self.literal)
+            .nth(seq.wrapping_sub(1))
+            .unwrap_or("")
+    }
+
+    /// The repetition as it appeared, component separators included.
+    pub const fn text(&self) -> &'a str {
+        self.raw
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.comps.iter().all(Component::is_empty)
+        if self.literal {
+            return self.raw.is_empty();
+        }
+        self.raw
+            .chars()
+            .all(|c| c == self.sep.component || c == self.sep.subcomponent)
     }
-    pub fn raw(&self, sep: &Separators) -> String {
-        self.comps
-            .iter()
-            .map(|c| c.raw(sep))
-            .collect::<Vec<_>>()
-            .join(&sep.component.to_string())
-    }
+
     /// Number of components actually carrying data.
     pub fn filled_comps(&self) -> usize {
-        self.comps
-            .iter()
-            .rposition(|c| !c.is_empty())
-            .map_or(0, |i| i + 1)
+        self.comps()
+            .enumerate()
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(i, _)| i + 1)
+            .last()
+            .unwrap_or(0)
     }
 }
 
 /// A field: one or more repetitions.
-#[derive(Debug, Clone)]
-pub struct Field {
-    pub reps: Vec<Repetition>,
-    /// Set for MSH-1/MSH-2, whose values are the delimiters themselves and must
-    /// never be re-split.
-    literal: Option<String>,
+#[derive(Debug, Clone, Copy)]
+pub struct Field<'a> {
+    raw: &'a str,
+    sep: Separators,
+    literal: bool,
 }
 
-impl Field {
-    fn literal(value: impl Into<String>) -> Self {
-        let value = value.into();
-        Self {
-            reps: vec![Repetition {
-                comps: vec![Component {
-                    subs: vec![value.clone()],
-                }],
-            }],
-            literal: Some(value),
-        }
-    }
-
+impl<'a> Field<'a> {
     pub fn is_empty(&self) -> bool {
-        self.reps.iter().all(Repetition::is_empty)
+        if self.literal {
+            return self.raw.is_empty();
+        }
+        self.raw.chars().all(|c| {
+            c == self.sep.repetition || c == self.sep.component || c == self.sep.subcomponent
+        })
     }
 
     /// HL7 explicit null: the two-character value `""` means "delete this value".
     pub fn is_null(&self) -> bool {
-        self.reps.len() == 1
-            && self.reps[0].comps.len() == 1
-            && self.reps[0].comp(1).sub(1) == "\"\""
+        self.rep_count() == 1
+            && split(self.raw, self.sep.component, self.literal).count() == 1
+            && self.rep(1).comp(1).sub(1) == "\"\""
     }
 
-    pub fn rep(&self, seq: usize) -> &Repetition {
-        const EMPTY: &Repetition = &Repetition { comps: Vec::new() };
-        self.reps.get(seq.wrapping_sub(1)).unwrap_or(EMPTY)
+    pub fn rep(&self, seq: usize) -> Repetition<'a> {
+        Repetition {
+            raw: split(self.raw, self.sep.repetition, self.literal)
+                .nth(seq.wrapping_sub(1))
+                .unwrap_or(""),
+            sep: self.sep,
+            literal: self.literal,
+        }
+    }
+
+    pub fn reps(&self) -> impl Iterator<Item = Repetition<'a>> {
+        let (sep, literal) = (self.sep, self.literal);
+        split(self.raw, self.sep.repetition, self.literal).map(move |raw| Repetition {
+            raw,
+            sep,
+            literal,
+        })
+    }
+
+    pub fn rep_count(&self) -> usize {
+        split(self.raw, self.sep.repetition, self.literal).count()
     }
 
     /// First repetition, component `seq`, as text.
-    pub fn comp(&self, seq: usize, sep: &Separators) -> String {
-        self.rep(1).comp_text(seq, sep)
+    pub fn comp(&self, seq: usize) -> &'a str {
+        self.rep(1).comp_text(seq)
     }
 
     /// Whole field as it appeared on the wire (repetitions included).
-    pub fn raw(&self, sep: &Separators) -> String {
-        if let Some(lit) = &self.literal {
-            return lit.clone();
-        }
-        self.reps
-            .iter()
-            .map(|r| r.raw(sep))
-            .collect::<Vec<_>>()
-            .join(&sep.repetition.to_string())
+    pub const fn text(&self) -> &'a str {
+        self.raw
     }
+}
+
+/// Splits on `sep`, or yields the whole text when it must not be split. An
+/// empty input still yields one empty piece, matching `str::split`.
+fn split(raw: &str, sep: char, literal: bool) -> impl Iterator<Item = &str> {
+    let mut whole = literal.then_some(raw);
+    let mut parts = (!literal).then(|| raw.split(sep));
+    std::iter::from_fn(move || match &mut parts {
+        Some(parts) => parts.next(),
+        None => whole.take(),
+    })
 }
 
 /// One segment line.
 #[derive(Debug, Clone)]
-pub struct Segment {
-    pub name: String,
+pub struct Segment<'a> {
+    pub name: &'a str,
     /// 1-based line number in the source file, for error reporting.
     pub line: usize,
     /// 1-based occurrence among segments with the same name.
     pub occurrence: usize,
-    /// Index 0 holds field 1.
-    pub fields: Vec<Field>,
-    pub raw: String,
+    /// The text of each field, in order. Index 0 holds field 1.
+    fields: Vec<&'a str>,
+    pub raw: &'a str,
+    sep: Separators,
 }
 
-impl Segment {
-    pub fn field(&self, seq: usize) -> Option<&Field> {
-        self.fields.get(seq.wrapping_sub(1))
+impl<'a> Segment<'a> {
+    pub fn field(&self, seq: usize) -> Option<Field<'a>> {
+        let raw = *self.fields.get(seq.wrapping_sub(1))?;
+        Some(Field {
+            raw,
+            sep: self.sep,
+            // MSH-1 is the field separator and MSH-2 the encoding characters:
+            // both are delimiters rather than values.
+            literal: self.name == "MSH" && seq <= 2,
+        })
     }
 
     /// True when field `seq` exists and carries data.
@@ -252,21 +310,20 @@ impl Segment {
     }
 
     /// Field `seq` as raw text, or `""` when absent.
-    pub fn text(&self, seq: usize, sep: &Separators) -> String {
-        self.field(seq).map(|f| f.raw(sep)).unwrap_or_default()
+    pub fn text(&self, seq: usize) -> &'a str {
+        self.field(seq).map_or("", |f| f.text())
     }
 
     /// First repetition, component `c`, of field `seq`.
-    pub fn comp(&self, seq: usize, c: usize, sep: &Separators) -> String {
-        self.field(seq).map(|f| f.comp(c, sep)).unwrap_or_default()
+    pub fn comp(&self, seq: usize, c: usize) -> &'a str {
+        self.field(seq).map_or("", |f| f.comp(c))
     }
 
     /// Highest field number carrying data.
     pub fn last_populated(&self) -> usize {
-        self.fields
-            .iter()
-            .rposition(|f| !f.is_empty())
-            .map_or(0, |i| i + 1)
+        (1..=self.fields.len())
+            .rfind(|seq| self.has(*seq))
+            .unwrap_or(0)
     }
 
     /// Z-segments are site-defined and exempt from dictionary checks.
@@ -274,78 +331,56 @@ impl Segment {
         self.name.starts_with('Z')
     }
 
-    fn parse(name: &str, raw: &str, line: usize, sep: &Separators) -> Self {
+    fn parse(name: &'a str, raw: &'a str, line: usize, sep: &Separators) -> Self {
         let parts: Vec<&str> = raw.split(sep.field).collect();
-        let mut fields: Vec<Field> = Vec::new();
+        let mut fields: Vec<&'a str> = Vec::new();
         // MSH is positionally special: MSH-1 *is* the field separator, so the
         // first split part after the name is MSH-2, not MSH-1.
         let rest = if name == "MSH" {
-            fields.push(Field::literal(sep.field.to_string()));
-            fields.push(Field::literal(parts.get(1).copied().unwrap_or("")));
+            // The separator itself, sliced from the line rather than rebuilt.
+            fields.push(&raw[name.len()..name.len() + sep.field.len_utf8()]);
+            fields.push(parts.get(1).copied().unwrap_or(""));
             &parts[2.min(parts.len())..]
         } else {
             &parts[1.min(parts.len())..]
         };
-        for part in rest {
-            fields.push(parse_field(part, sep));
-        }
+        fields.extend_from_slice(rest);
         Self {
-            name: name.to_string(),
+            name,
             line,
             occurrence: 1,
             fields,
-            raw: raw.to_string(),
+            raw,
+            sep: *sep,
         }
-    }
-}
-
-fn parse_field(s: &str, sep: &Separators) -> Field {
-    let reps = s
-        .split(sep.repetition)
-        .map(|rep| Repetition {
-            comps: rep
-                .split(sep.component)
-                .map(|c| Component {
-                    subs: c.split(sep.subcomponent).map(ToString::to_string).collect(),
-                })
-                .collect(),
-        })
-        .collect();
-    Field {
-        reps,
-        literal: None,
     }
 }
 
 /// A fully decomposed HL7 message.
 #[derive(Debug, Clone)]
-pub struct Message {
+pub struct Message<'a> {
     pub sep: Separators,
-    pub segments: Vec<Segment>,
+    pub segments: Vec<Segment<'a>>,
     /// 1-based line where this message's MSH was found.
     pub start_line: usize,
     /// Non-fatal observations made while tokenising (stray bytes, batch wrappers).
     pub notes: Vec<String>,
 }
 
-impl Message {
-    pub fn msh(&self) -> &Segment {
+impl<'a> Message<'a> {
+    pub fn msh(&self) -> &Segment<'a> {
         &self.segments[0]
     }
 
     /// MSH-12.1, e.g. `2.5.1`.
-    pub fn version(&self) -> String {
-        self.msh().comp(12, 1, &self.sep)
+    pub fn version(&self) -> &'a str {
+        self.msh().comp(12, 1)
     }
 
     /// (message code, trigger event, structure) from MSH-9.
-    pub fn message_type(&self) -> (String, String, String) {
+    pub fn message_type(&self) -> (&'a str, &'a str, &'a str) {
         let f = self.msh();
-        (
-            f.comp(9, 1, &self.sep),
-            f.comp(9, 2, &self.sep),
-            f.comp(9, 3, &self.sep),
-        )
+        (f.comp(9, 1), f.comp(9, 2), f.comp(9, 3))
     }
 
     /// `ADT^A01`, or just `ADT` when no trigger event is present.
@@ -353,20 +388,20 @@ impl Message {
         let (code, trigger, _) = self.message_type();
         match (code.is_empty(), trigger.is_empty()) {
             (true, _) => "(no MSH-9)".to_string(),
-            (false, true) => code,
+            (false, true) => code.to_string(),
             (false, false) => format!("{code}^{trigger}"),
         }
     }
 
-    pub fn control_id(&self) -> String {
-        self.msh().comp(10, 1, &self.sep)
+    pub fn control_id(&self) -> &'a str {
+        self.msh().comp(10, 1)
     }
 
-    pub fn find(&self, name: &str) -> Vec<&Segment> {
+    pub fn find(&self, name: &str) -> Vec<&Segment<'a>> {
         self.segments.iter().filter(|s| s.name == name).collect()
     }
 
-    pub fn first(&self, name: &str) -> Option<&Segment> {
+    pub fn first(&self, name: &str) -> Option<&Segment<'a>> {
         self.segments.iter().find(|s| s.name == name)
     }
 }
@@ -503,8 +538,8 @@ pub fn split_messages(raw: &str) -> (Vec<RawMessage<'_>>, Vec<String>) {
 
 /// The three-character name a line starts with, when it is a usable segment
 /// name. Shared so the whole-message check and the segment loop cannot drift.
-fn segment_name(text: &str) -> Option<String> {
-    let name: String = text.chars().take(3).collect();
+fn segment_name(text: &str) -> Option<&str> {
+    let name = head(text);
     let usable = name.chars().count() == 3
         && name
             .chars()
@@ -521,7 +556,7 @@ impl RawMessage<'_> {
     pub fn separators(&self) -> Result<Separators, ParseError> {
         let (lineno, text) = self.first_line();
         let sep = Separators::from_msh(text).map_err(|e| ParseError::new(lineno, e.message))?;
-        if segment_name(text).as_deref() != Some("MSH") {
+        if segment_name(text) != Some("MSH") {
             return Err(ParseError::new(
                 lineno,
                 "message does not begin with a parsable MSH segment",
@@ -531,12 +566,12 @@ impl RawMessage<'_> {
     }
 }
 
-pub fn parse_message(raw: &RawMessage<'_>) -> Result<Message, ParseError> {
+pub fn parse_message<'a>(raw: &RawMessage<'a>) -> Result<Message<'a>, ParseError> {
     let sep = raw.separators()?;
 
-    let mut segments: Vec<Segment> = Vec::new();
+    let mut segments: Vec<Segment<'a>> = Vec::new();
     let mut notes = raw.notes.clone();
-    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut counts: Vec<(&str, usize)> = Vec::new();
 
     for (lineno, text) in raw.lines() {
         let Some(name) = segment_name(text) else {
@@ -552,13 +587,13 @@ pub fn parse_message(raw: &RawMessage<'_>) -> Result<Message, ParseError> {
                 "line {lineno}: segment {name} has no field separator after the name"
             ));
         }
-        let mut seg = Segment::parse(&name, text, lineno, &sep);
-        let entry = counts.iter_mut().find(|(n, _)| n == &name);
+        let mut seg = Segment::parse(name, text, lineno, &sep);
+        let entry = counts.iter_mut().find(|(n, _)| *n == name);
         seg.occurrence = if let Some((_, c)) = entry {
             *c += 1;
             *c
         } else {
-            counts.push((name.clone(), 1));
+            counts.push((name, 1));
             1
         };
         segments.push(seg);
@@ -638,7 +673,7 @@ pub fn unescape(s: &str, sep: &Separators) -> String {
 }
 
 #[cfg(test)]
-pub fn parse_str(text: &str) -> Message {
+pub fn parse_str(text: &str) -> Message<'_> {
     let (raws, _) = split_messages(text);
     parse_message(&raws[0]).expect("fixture should parse")
 }
@@ -674,10 +709,10 @@ PV1|1|I|ER^101^A&Bay 2^MERCY\r";
     fn msh_field_numbering_is_offset_by_the_separator() {
         let m = parse_str(ADT);
         let msh = m.msh();
-        assert_eq!(msh.text(1, &m.sep), "|");
-        assert_eq!(msh.text(2, &m.sep), "^~\\&");
-        assert_eq!(msh.text(3, &m.sep), "HIS");
-        assert_eq!(msh.comp(9, 2, &m.sep), "A01");
+        assert_eq!(msh.text(1), "|");
+        assert_eq!(msh.text(2), "^~\\&");
+        assert_eq!(msh.text(3), "HIS");
+        assert_eq!(msh.comp(9, 2), "A01");
         assert_eq!(m.version(), "2.5.1");
         assert_eq!(m.control_id(), "MSG1");
     }
@@ -687,9 +722,9 @@ PV1|1|I|ER^101^A&Bay 2^MERCY\r";
         let m = parse_str(ADT);
         let pid = m.first("PID").unwrap();
         let ids = pid.field(3).unwrap();
-        assert_eq!(ids.reps.len(), 2);
-        assert_eq!(ids.rep(2).comp_text(1, &m.sep), "999");
-        assert_eq!(ids.rep(1).comp_text(5, &m.sep), "MR");
+        assert_eq!(ids.rep_count(), 2);
+        assert_eq!(ids.rep(2).comp_text(1), "999");
+        assert_eq!(ids.rep(1).comp_text(5), "MR");
 
         let pv1 = m.first("PV1").unwrap();
         let location = pv1.field(3).unwrap().rep(1);

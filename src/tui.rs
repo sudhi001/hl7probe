@@ -41,8 +41,8 @@ enum Focus {
     Findings,
 }
 
-struct App {
-    items: Vec<(String, Message, Report)>,
+struct App<'a> {
+    items: Vec<(String, Message<'a>, Report)>,
     current: usize,
     segments: ListState,
     fields: ListState,
@@ -55,8 +55,8 @@ struct App {
     help: bool,
 }
 
-impl App {
-    fn new(items: Vec<(String, Message, Report)>) -> Self {
+impl<'a> App<'a> {
+    fn new(items: Vec<(String, Message<'a>, Report)>) -> Self {
         let mut segments = ListState::default();
         segments.select(Some(0));
         Self {
@@ -74,7 +74,7 @@ impl App {
         }
     }
 
-    fn msg(&self) -> &Message {
+    fn msg(&self) -> &Message<'_> {
         &self.items[self.current].1
     }
     fn report(&self) -> &Report {
@@ -168,7 +168,7 @@ impl App {
     }
 }
 
-pub fn run(items: Vec<(String, Message, Report)>) -> io::Result<()> {
+pub fn run(items: Vec<(String, Message<'_>, Report)>) -> io::Result<()> {
     // A panic inside the alternate screen would otherwise leave the terminal in
     // raw mode with no cursor.
     let hook = std::panic::take_hook();
@@ -197,7 +197,10 @@ fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
     terminal.show_cursor()
 }
 
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App<'_>,
+) -> io::Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, app))?;
         if !event::poll(Duration::from_millis(250))? {
@@ -216,7 +219,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 }
 
 /// Returns true when the app should exit.
-fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+fn handle_key(app: &mut App<'_>, key: KeyEvent) -> bool {
     if app.help {
         app.help = false;
         return false;
@@ -258,7 +261,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
-fn draw(frame: &mut Frame<'_>, app: &mut App) {
+fn draw(frame: &mut Frame<'_>, app: &mut App<'_>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -285,10 +288,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
-fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame<'_>, app: &App<'_>, area: Rect) {
     let msg = app.msg();
     let report = app.report();
-    let sep = &msg.sep;
     let version = msg.version();
     let desc = report.structure.map_or("", |s| s.desc);
 
@@ -314,13 +316,13 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     let mut meta: Vec<String> = Vec::new();
     if !msg.control_id().is_empty() {
-        meta.push(msg.control_id());
+        meta.push(msg.control_id().to_string());
     }
-    if let Ok(ts) = crate::datetime::parse_ts(&msg.msh().comp(7, 1, sep)) {
+    if let Ok(ts) = crate::datetime::parse_ts(msg.msh().comp(7, 1)) {
         meta.push(ts.display());
     }
-    let sending = msg.msh().comp(3, 1, sep);
-    let receiving = msg.msh().comp(5, 1, sep);
+    let sending = msg.msh().comp(3, 1);
+    let receiving = msg.msh().comp(5, 1);
     if !sending.is_empty() || !receiving.is_empty() {
         meta.push(format!("{sending} \u{2192} {receiving}"));
     }
@@ -334,7 +336,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     ];
     if app.show_raw {
         lines.push(Line::from(Span::styled(
-            msg.segments[app.seg_index()].raw.clone(),
+            msg.segments[app.seg_index()].raw,
             Style::default().fg(MUTED),
         )));
     }
@@ -375,7 +377,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         ))
 }
 
-fn draw_segments(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+fn draw_segments(frame: &mut Frame<'_>, app: &mut App<'_>, area: Rect) {
     let msg = &app.items[app.current].1;
     let report = &app.items[app.current].2;
     let items: Vec<ListItem<'_>> = msg
@@ -384,7 +386,7 @@ fn draw_segments(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .enumerate()
         .map(|(i, seg)| {
             let sev = report.segment_severity(i, app.verbose);
-            let count = msg.find(&seg.name).len();
+            let count = msg.find(seg.name).len();
             let suffix = if count > 1 {
                 format!(" {}/{}", seg.occurrence, count)
             } else {
@@ -398,7 +400,7 @@ fn draw_segments(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Span::styled(render::glyph(sev), severity_style(sev)),
                 Span::styled(suffix, Style::default().fg(MUTED)),
                 Span::styled(
-                    format!("  {}", spec::segment_desc(&seg.name).unwrap_or("")),
+                    format!("  {}", spec::segment_desc(seg.name).unwrap_or("")),
                     Style::default().fg(MUTED),
                 ),
             ]))
@@ -417,7 +419,7 @@ fn draw_segments(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.segments);
 }
 
-fn draw_fields(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+fn draw_fields(frame: &mut Frame<'_>, app: &mut App<'_>, area: Rect) {
     let seg_index = app.seg_index();
     let rows = app.rows();
     let seg = &app.items[app.current].1.segments[seg_index];
@@ -439,7 +441,7 @@ fn draw_fields(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let title = format!(
         "{}  {}   line {}",
         seg.name,
-        spec::segment_desc(&seg.name).unwrap_or(""),
+        spec::segment_desc(seg.name).unwrap_or(""),
         seg.line
     );
     let focused = app.focus == Focus::Fields;
@@ -498,7 +500,7 @@ const fn render_glyph_or_space(sev: Option<Severity>) -> &'static str {
     }
 }
 
-fn draw_findings(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+fn draw_findings(frame: &mut Frame<'_>, app: &mut App<'_>, area: Rect) {
     let findings = app.visible_findings();
     let scope = if app.all_findings {
         "all segments"
@@ -546,7 +548,7 @@ fn draw_findings(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.findings);
 }
 
-fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_footer(frame: &mut Frame<'_>, app: &App<'_>, area: Rect) {
     let toggles = format!(
         "empty:{}  notes:{}  raw:{}  scope:{}",
         on_off(app.show_empty),
@@ -646,20 +648,28 @@ EVN|A01|20240115143200||||20240115143000\r\
 PID|1||123456^^^MERCY^MR||Smith^John^A||19850332|M\r\
 PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
 
-    fn app() -> App {
+    fn app() -> App<'static> {
         let msg = parse_str(MSG);
         let report = validate(&msg);
         App::new(vec![("test.hl7".to_string(), msg, report)])
     }
 
-    /// A second message, so the wrap-around in `move_message` has somewhere to go.
-    fn two_message_app() -> App {
-        let items = ["MSG1", "MSG2"]
+    /// Two messages, so the wrap-around in `move_message` has somewhere to go.
+    /// The texts are the caller's: a message borrows the text it was read from.
+    fn two_message_texts() -> Vec<String> {
+        ["MSG1", "MSG2"]
             .iter()
-            .map(|id| {
-                let msg = parse_str(&MSG.replace("MSG1", id));
+            .map(|id| MSG.replace("MSG1", id))
+            .collect()
+    }
+
+    fn app_over(texts: &[String]) -> App<'_> {
+        let items = texts
+            .iter()
+            .map(|text| {
+                let msg = parse_str(text);
                 let report = validate(&msg);
-                ((*id).to_string(), msg, report)
+                (msg.control_id().to_string(), msg, report)
             })
             .collect();
         App::new(items)
@@ -667,7 +677,8 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
 
     #[test]
     fn message_navigation_wraps_in_both_directions() {
-        let mut batch = two_message_app();
+        let texts = two_message_texts();
+        let mut batch = app_over(&texts);
         assert_eq!(batch.current, 0);
         batch.move_message(1);
         assert_eq!(batch.current, 1);
@@ -699,7 +710,7 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
         assert_eq!(app.segments.selected(), Some(0));
     }
 
-    fn screen(app: &mut App) -> String {
+    fn screen(app: &mut App<'_>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
         terminal
@@ -726,7 +737,8 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
-        let msg = parse_str(&std::fs::read_to_string(&path).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let msg = parse_str(&text);
         let report = validate(&msg);
         let name = std::path::Path::new(&path)
             .file_name()
@@ -740,7 +752,7 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
     }
 
     /// Re-emits a rendered buffer as ANSI so the colours survive the dump.
-    fn ansi_screen(app: &mut App) -> String {
+    fn ansi_screen(app: &mut App<'_>) -> String {
         let height: u16 = std::env::var("HL7TEST_DUMP_ROWS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -855,8 +867,9 @@ PV1|1|I|ER^101^A|E|||1234^Adams^Alice||||||||||||V1\r";
 
     #[test]
     fn n_and_p_walk_through_a_batch() {
+        let second = MSG.replace("ADT^A01^ADT_A01|MSG1", "ADT^A03^ADT_A03|MSG2");
         let one = parse_str(MSG);
-        let two = parse_str(&MSG.replace("ADT^A01^ADT_A01|MSG1", "ADT^A03^ADT_A03|MSG2"));
+        let two = parse_str(&second);
         let mut app = App::new(vec![
             ("batch.hl7".into(), one, validate(&parse_str(MSG))),
             ("batch.hl7".into(), two, validate(&parse_str(MSG))),

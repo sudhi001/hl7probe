@@ -109,9 +109,8 @@ fn rule(p: Paint, width: usize) -> String {
 }
 
 /// Header block: version, message type, routing and identifiers.
-pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
+pub fn message_header(msg: &Message<'_>, report: &Report, o: &Options) -> String {
     let p = o.paint;
-    let sep = &msg.sep;
     let mut out = String::new();
     let version = msg.version();
     let version_label = if version.is_empty() {
@@ -123,7 +122,7 @@ pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
     let desc = report
         .structure
         .map(|s| s.desc.to_string())
-        .or_else(|| spec::trigger_desc(&msg.message_type().1).map(ToString::to_string))
+        .or_else(|| spec::trigger_desc(msg.message_type().1).map(ToString::to_string))
         .unwrap_or_default();
 
     let _ = writeln!(
@@ -141,13 +140,13 @@ pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
     let mut meta: Vec<String> = Vec::new();
     let control = msg.control_id();
     if !control.is_empty() {
-        meta.push(control);
+        meta.push(control.to_string());
     }
-    if let Ok(ts) = datetime::parse_ts(&msg.msh().comp(7, 1, sep)) {
+    if let Ok(ts) = datetime::parse_ts(msg.msh().comp(7, 1)) {
         meta.push(ts.display());
     }
-    let sending = join_app(&msg.msh().comp(3, 1, sep), &msg.msh().comp(4, 1, sep));
-    let receiving = join_app(&msg.msh().comp(5, 1, sep), &msg.msh().comp(6, 1, sep));
+    let sending = join_app(msg.msh().comp(3, 1), msg.msh().comp(4, 1));
+    let receiving = join_app(msg.msh().comp(5, 1), msg.msh().comp(6, 1));
     if !sending.is_empty() || !receiving.is_empty() {
         meta.push(format!(
             "{} \u{2192} {}",
@@ -163,8 +162,8 @@ pub fn message_header(msg: &Message, report: &Report, o: &Options) -> String {
             }
         ));
     }
-    let processing = msg.msh().comp(11, 1, sep);
-    if let Some(meaning) = spec::code_meaning("0103", &processing) {
+    let processing = msg.msh().comp(11, 1);
+    if let Some(meaning) = spec::code_meaning("0103", processing) {
         meta.push(meaning.to_string());
     }
     if !meta.is_empty() {
@@ -183,14 +182,14 @@ fn join_app(app: &str, facility: &str) -> String {
 }
 
 /// The `MSH ✓ / EVN ✓ / PID ⚠` overview.
-pub fn segment_overview(msg: &Message, report: &Report, o: &Options) -> String {
+pub fn segment_overview(msg: &Message<'_>, report: &Report, o: &Options) -> String {
     let p = o.paint;
     let mut out = String::new();
     let _ = writeln!(out, "{}", p.bold("Segments"));
     let _ = writeln!(out, "{}", rule(p, o.width.min(60)));
     for (i, seg) in msg.segments.iter().enumerate() {
         let sev = report.segment_severity(i, o.verbose);
-        let desc = spec::segment_desc(&seg.name).map_or_else(
+        let desc = spec::segment_desc(seg.name).map_or_else(
             || {
                 if seg.is_custom() {
                     "site-defined segment".into()
@@ -200,7 +199,7 @@ pub fn segment_overview(msg: &Message, report: &Report, o: &Options) -> String {
             },
             ToString::to_string,
         );
-        let repeat = msg.find(&seg.name).len();
+        let repeat = msg.find(seg.name).len();
         let occurrence = if repeat > 1 {
             p.dim(&format!(" ({}/{})", seg.occurrence, repeat))
         } else {
@@ -209,7 +208,7 @@ pub fn segment_overview(msg: &Message, report: &Report, o: &Options) -> String {
         let _ = writeln!(
             out,
             "{} {}{}  {}",
-            p.bold(&seg.name),
+            p.bold(seg.name),
             paint_status(p, sev),
             occurrence,
             p.dim(&desc)
@@ -300,20 +299,20 @@ fn format_row(row: &FieldRow, columns: &Columns, o: &Options) -> String {
 
 /// The detail table for one segment occurrence.
 pub fn segment_detail(
-    msg: &Message,
-    seg: &Segment,
+    msg: &Message<'_>,
+    seg: &Segment<'_>,
     index: usize,
     report: &Report,
     o: &Options,
 ) -> String {
     let p = o.paint;
     let mut out = String::new();
-    let desc = spec::segment_desc(&seg.name).unwrap_or("");
-    let count = msg.find(&seg.name).len();
+    let desc = spec::segment_desc(seg.name).unwrap_or("");
+    let count = msg.find(seg.name).len();
     let title = if count > 1 {
         format!("{} ({} of {})", seg.name, seg.occurrence, count)
     } else {
-        seg.name.clone()
+        seg.name.to_string()
     };
     let heading = if desc.is_empty() {
         p.bold(&title)
@@ -328,7 +327,7 @@ pub fn segment_detail(
     );
     let _ = writeln!(out, "{}", rule(p, o.width.min(72)));
     if o.raw {
-        let _ = writeln!(out, "{}", p.dim(&truncate(&seg.raw, o.width)));
+        let _ = writeln!(out, "{}", p.dim(&truncate(seg.raw, o.width)));
     }
 
     let rows = segment_rows(
@@ -466,14 +465,14 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 /// Full report for one message.
-pub fn render_message(msg: &Message, report: &Report, o: &Options) -> String {
+pub fn render_message(msg: &Message<'_>, report: &Report, o: &Options) -> String {
     let mut out = String::new();
     out.push_str(&message_header(msg, report, o));
     out.push('\n');
     out.push_str(&segment_overview(msg, report, o));
     if !o.summary_only {
         for (i, seg) in msg.segments.iter().enumerate() {
-            if !o.only.is_empty() && !o.only.iter().any(|n| n.eq_ignore_ascii_case(&seg.name)) {
+            if !o.only.is_empty() && !o.only.iter().any(|n| n.eq_ignore_ascii_case(seg.name)) {
                 continue;
             }
             out.push('\n');
@@ -532,10 +531,10 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
 
     #[test]
     fn findings_are_listed_with_their_location() {
-        let msg = parse_str(
-            &MSG.replace("19850312", "19850332")
-                .replace("|ER^101^A^MERCY|", "|^101^A|"),
-        );
+        let text = MSG
+            .replace("19850312", "19850332")
+            .replace("|ER^101^A^MERCY|", "|^101^A|");
+        let msg = parse_str(&text);
         let report = validate(&msg);
         let text = render_message(&msg, &report, &options());
         assert!(text.contains("PID-7"));
@@ -592,9 +591,10 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
     #[test]
     fn long_values_are_truncated_to_the_terminal_width() {
         let long = "X".repeat(400);
-        let msg = parse_str(&format!(
+        let text = format!(
             "MSH|^~\\&|HIS|MERCY|LIS|LAB|20240115143200||ADT^A01|MSG1|P|2.5.1\rPID|1||1^^^A^MR||{long}\r"
-        ));
+        );
+        let msg = parse_str(&text);
         let report = validate(&msg);
         let mut narrow = options();
         narrow.width = 80;

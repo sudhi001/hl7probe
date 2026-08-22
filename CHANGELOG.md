@@ -16,24 +16,35 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
   | Command | Before | After |
   | --- | --- | --- |
-  | `hl7probe -q` | 2,234 MB / 1.50s | 129 MB / 1.25s |
-  | `hl7probe -f PID-5.1` | 2,234 MB / 1.54s | 129 MB / 0.57s |
-  | `hl7probe` | 2,417 MB / 3.76s | 129 MB / 3.50s |
-  | `hl7probe --json` | 4,598 MB / 11.16s | 129 MB / 6.51s |
+  | `hl7probe -q` | 2,234 MB / 1.50s | 33 MB / 1.04s |
+  | `hl7probe -f PID-5.1` | 2,234 MB / 1.54s | 33 MB / 0.14s |
+  | `hl7probe` | 2,417 MB / 3.76s | 34 MB / 3.08s |
+  | `hl7probe --json` | 4,598 MB / 11.16s | 34 MB / 6.03s |
+
+  (Those totals include the two entries below, which land in the same
+  release.)
 
   It is faster as well as smaller, because the allocator is no longer carrying
   most of a gigabyte of live objects. The viewer still parses the batch up
   front; it has to, to let you page back and forth. Output is unchanged,
   including the placement of parse errors above the messages they sit among -
   a scan pass finds the unreadable messages first, reading only each MSH line.
+- A parsed message is a set of views over the file text, not an owned tree.
+  Every field, component and subcomponent used to become its own `String`, and
+  every level its own `Vec` - for a 523-byte message that was 482 allocations
+  and 40 KB, most of it spent wrapping leaves that average under three bytes.
+  A field now carries the text it occupied and splits it when asked, which
+  costs 35 allocations and 2.4 KB per message and makes the whole run 12-15%
+  faster. It is what the interactive viewer pays per message, so holding a
+  20,000-message batch open drops from 794 MB to 48 MB.
 - A batch file is read once and never copied. Splitting messages used to
   normalise the whole input into a new `String` (two full copies), then copy
   every line into a `String` of its own, then keep a 24-byte index entry per
   line for the whole file. It now iterates the line endings in place and
   records a byte range per message, re-splitting a message's own lines when it
-  is parsed. Peak memory over a 26 MB batch falls from 129 MB to 33 MB, and
-  over a 10.5 MB batch from 53 MB to 15 MB - about 1.3x the file, most of
-  which is the file itself.
+  is parsed. Together with the change above, peak memory over a 26 MB batch
+  falls from 2.2 GB to 33 MB - about 1.3x the file, most of which is the file
+  itself.
 - `--json` is written straight to stdout as the messages are parsed rather than
   assembled as one `serde_json::Value` tree and then printed. The document's
   `status` still reflects the whole run, because serde_json orders keys

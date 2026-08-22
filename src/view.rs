@@ -51,7 +51,7 @@ pub struct RowOptions {
 
 /// Builds the field table for one segment occurrence.
 pub fn segment_rows(
-    msg: &Message,
+    msg: &Message<'_>,
     seg_index: usize,
     report: &Report,
     options: RowOptions,
@@ -61,8 +61,8 @@ pub fn segment_rows(
     let findings = report.for_segment(seg_index);
 
     let mut rows = Vec::new();
-    for seq in field_positions(&seg.name, seg.last_populated()) {
-        let field_spec = spec::field_spec(&seg.name, seq);
+    for seq in field_positions(seg.name, seg.last_populated()) {
+        let field_spec = spec::field_spec(seg.name, seq);
         let usage = field_spec.map(|f| f.usage);
         let expected = matches!(usage, Some(Use::Required | Use::Recommended));
         let present = seg.has(seq);
@@ -78,7 +78,7 @@ pub fn segment_rows(
             .filter(|f| options.include_info || f.severity != Severity::Info)
             .map(|f| f.severity)
             .max();
-        let label = spec::field_label(&seg.name, seq);
+        let label = spec::field_label(seg.name, seq);
 
         let Some(field) = seg.field(seq).filter(|_| present) else {
             rows.push(FieldRow {
@@ -94,8 +94,8 @@ pub fn segment_rows(
             continue;
         };
 
-        for (index, rep) in field.reps.iter().enumerate() {
-            let value = unescape(&rep.raw(sep), sep).replace('\n', " \u{21b5} ");
+        for (index, rep) in field.reps().enumerate() {
+            let value = unescape(rep.text(), sep).replace('\n', " \u{21b5} ");
             let decoded = humanize(field_spec, rep, sep).filter(|d| *d != value);
             rows.push(FieldRow {
                 seq,
@@ -130,11 +130,11 @@ fn field_positions(segment: &str, last_populated: usize) -> Vec<usize> {
 /// becomes `John Smith` and `19850312` becomes `1985-03-12, age 40`.
 pub fn humanize(
     fs: Option<&spec::FieldSpec>,
-    rep: &Repetition,
+    rep: Repetition<'_>,
     sep: &Separators,
 ) -> Option<String> {
     let fs = fs?;
-    let c = |n: usize| unescape(&rep.comp_text(n, sep), sep);
+    let c = |n: usize| unescape(rep.comp_text(n), sep);
     let c1 = c(1);
     if c1.is_empty() && rep.filled_comps() == 0 {
         return None;
@@ -292,7 +292,7 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
         )
     }
 
-    fn humanized(segment: &str, seq: usize, msg: &Message) -> Option<String> {
+    fn humanized(segment: &str, seq: usize, msg: &Message<'_>) -> Option<String> {
         let seg = msg.first(segment).unwrap();
         humanize(
             spec::field_spec(segment, seq),
@@ -327,7 +327,8 @@ PV1|1|I|ER^101^A^MERCY|E|||1234^Adams^Alice^^^Dr||||||||||||V1||||||||||||||||||
 
     #[test]
     fn coded_values_are_not_repeated_after_their_meaning() {
-        let msg = parse_str(&format!("{MSG}AL1|1|DA|PEN^Penicillin^L|SV\r"));
+        let text = format!("{MSG}AL1|1|DA|PEN^Penicillin^L|SV\r");
+        let msg = parse_str(&text);
         assert_eq!(humanized("AL1", 2, &msg).unwrap(), "Drug allergy");
         assert_eq!(humanized("AL1", 3, &msg).unwrap(), "Penicillin (PEN) [L]");
     }
