@@ -26,6 +26,14 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   front; it has to, to let you page back and forth. Output is unchanged,
   including the placement of parse errors above the messages they sit among -
   a scan pass finds the unreadable messages first, reading only each MSH line.
+- A batch file is read once and never copied. Splitting messages used to
+  normalise the whole input into a new `String` (two full copies), then copy
+  every line into a `String` of its own, then keep a 24-byte index entry per
+  line for the whole file. It now iterates the line endings in place and
+  records a byte range per message, re-splitting a message's own lines when it
+  is parsed. Peak memory over a 26 MB batch falls from 129 MB to 33 MB, and
+  over a 10.5 MB batch from 53 MB to 15 MB - about 1.3x the file, most of
+  which is the file itself.
 - `--json` is written straight to stdout as the messages are parsed rather than
   assembled as one `serde_json::Value` tree and then printed. The document's
   `status` still reflects the whole run, because serde_json orders keys

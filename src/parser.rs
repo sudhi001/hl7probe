@@ -372,51 +372,131 @@ impl Message {
 }
 
 /// One message's worth of source lines, still unparsed.
-pub struct RawMessage {
+/// Where a message sits in the file, rather than a copy of it or an index of
+/// its lines. Splitting the lines again when the message is parsed costs the
+/// same walk either way, and it keeps a whole batch down to a few bytes per
+/// message instead of twenty-four per line.
+pub struct RawMessage<'a> {
     pub start_line: usize,
-    pub lines: Vec<(usize, String)>,
+    text: &'a str,
     pub notes: Vec<String>,
+}
+
+impl<'a> RawMessage<'a> {
+    /// The segment lines this message is made of, cleaned of framing bytes and
+    /// numbered as they are in the file. Blank lines and batch wrappers are
+    /// skipped here exactly as `split_messages` skipped them.
+    pub fn lines(&self) -> impl Iterator<Item = (usize, &'a str)> + '_ {
+        lines(self.text)
+            .enumerate()
+            .filter_map(move |(offset, (_, line))| {
+                let cleaned = clean(line);
+                if cleaned.is_empty() || is_batch_wrapper(head(cleaned)) {
+                    return None;
+                }
+                Some((self.start_line + offset, cleaned))
+            })
+    }
+
+    /// The MSH line, which every message starts with and which decides on its
+    /// own whether the message can be read at all.
+    fn first_line(&self) -> (usize, &'a str) {
+        self.lines().next().unwrap_or((self.start_line, self.text))
+    }
+}
+
+/// Splits on CR, LF or CRLF, counting CRLF as one break so line numbers match
+/// what an editor shows, and reports where each line starts. Iterating beats
+/// normalising the whole file into a new `String` first, which cost two full
+/// copies of the input.
+fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0usize;
+    let mut rest = Some(text);
+    std::iter::from_fn(move || {
+        let current = rest?;
+        let start = offset;
+        match current.find(['\r', '\n']) {
+            None => {
+                rest = None;
+                Some((start, current))
+            }
+            Some(at) => {
+                let (line, tail) = current.split_at(at);
+                let skip = usize::from(tail.starts_with("\r\n")) + 1;
+                offset += at + skip;
+                rest = Some(&tail[skip..]);
+                Some((start, line))
+            }
+        }
+    })
+}
+
+/// Strips MLLP framing bytes and surrounding whitespace from a line.
+fn clean(line: &str) -> &str {
+    line.trim_matches(|c: char| {
+        c == '\u{0b}' || c == '\u{1c}' || c == '\u{1d}' || c == '\0' || c.is_whitespace()
+    })
+}
+
+fn is_batch_wrapper(head: &str) -> bool {
+    matches!(head, "FHS" | "BHS" | "BTS" | "FTS")
+}
+
+/// The first three characters of a line, which is where a segment name lives.
+fn head(text: &str) -> &str {
+    let end = text.char_indices().nth(3).map_or(text.len(), |(i, _)| i);
+    &text[..end]
 }
 
 /// Splits a file into messages, tolerating CR/LF/CRLF endings, MLLP framing
 /// bytes and HL7 batch (FHS/BHS/BTS/FTS) wrappers.
-pub fn split_messages(raw: &str) -> (Vec<RawMessage>, Vec<String>) {
-    let mut messages: Vec<RawMessage> = Vec::new();
+pub fn split_messages(raw: &str) -> (Vec<RawMessage<'_>>, Vec<String>) {
+    let mut messages: Vec<RawMessage<'_>> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
     let mut pending_notes: Vec<String> = Vec::new();
     let mut stray_reported = false;
+    // Byte range of the message being accumulated, so it can be sliced out of
+    // `raw` once the next MSH (or the end of the file) closes it.
+    let mut open: Option<(usize, usize)> = None;
 
-    for (idx, line) in normalized.split('\n').enumerate() {
+    for (idx, (offset, line)) in lines(raw).enumerate() {
         let lineno = idx + 1;
-        let cleaned = line.trim_matches(|c: char| {
-            c == '\u{0b}' || c == '\u{1c}' || c == '\u{1d}' || c == '\0' || c.is_whitespace()
-        });
+        let cleaned = clean(line);
         if cleaned.is_empty() {
             continue;
         }
-        let head: String = cleaned.chars().take(3).collect();
-        match head.as_str() {
-            "FHS" | "BHS" | "BTS" | "FTS" => {
-                pending_notes.push(format!("line {lineno}: batch wrapper {head} skipped"));
-                continue;
-            }
-            _ => {}
+        let head = head(cleaned);
+        if is_batch_wrapper(head) {
+            pending_notes.push(format!("line {lineno}: batch wrapper {head} skipped"));
+            continue;
         }
+        let line_end = offset + line.len();
         if head == "MSH" {
+            if let Some((start, end)) = open.replace((offset, line_end)) {
+                messages
+                    .last_mut()
+                    .expect("an open range has a message")
+                    .text = &raw[start..end];
+            }
             messages.push(RawMessage {
                 start_line: lineno,
-                lines: vec![(lineno, cleaned.to_string())],
+                text: &raw[offset..line_end],
                 notes: std::mem::take(&mut pending_notes),
             });
-        } else if let Some(current) = messages.last_mut() {
-            current.lines.push((lineno, cleaned.to_string()));
+        } else if let Some((_, end)) = open.as_mut() {
+            *end = line_end;
         } else if !stray_reported {
             stray_reported = true;
             warnings.push(format!(
                 "line {lineno}: content before the first MSH segment was ignored"
             ));
         }
+    }
+    if let Some((start, end)) = open {
+        messages
+            .last_mut()
+            .expect("an open range has a message")
+            .text = &raw[start..end];
     }
     (messages, warnings)
 }
@@ -433,17 +513,17 @@ fn segment_name(text: &str) -> Option<String> {
     usable.then_some(name)
 }
 
-impl RawMessage {
+impl RawMessage<'_> {
     /// The delimiters this message declares, or the reason it cannot be read.
     /// Both of `parse_message`'s failure modes are settled by the first line,
     /// so a batch can be checked for unreadable messages without building a
     /// single tree.
     pub fn separators(&self) -> Result<Separators, ParseError> {
-        let (lineno, text) = &self.lines[0];
-        let sep = Separators::from_msh(text).map_err(|e| ParseError::new(*lineno, e.message))?;
+        let (lineno, text) = self.first_line();
+        let sep = Separators::from_msh(text).map_err(|e| ParseError::new(lineno, e.message))?;
         if segment_name(text).as_deref() != Some("MSH") {
             return Err(ParseError::new(
-                *lineno,
+                lineno,
                 "message does not begin with a parsable MSH segment",
             ));
         }
@@ -451,14 +531,14 @@ impl RawMessage {
     }
 }
 
-pub fn parse_message(raw: &RawMessage) -> Result<Message, ParseError> {
+pub fn parse_message(raw: &RawMessage<'_>) -> Result<Message, ParseError> {
     let sep = raw.separators()?;
 
     let mut segments: Vec<Segment> = Vec::new();
     let mut notes = raw.notes.clone();
     let mut counts: Vec<(String, usize)> = Vec::new();
 
-    for (lineno, text) in &raw.lines {
+    for (lineno, text) in raw.lines() {
         let Some(name) = segment_name(text) else {
             notes.push(format!(
                 "line {}: skipped unrecognisable segment starting {:?}",
@@ -472,7 +552,7 @@ pub fn parse_message(raw: &RawMessage) -> Result<Message, ParseError> {
                 "line {lineno}: segment {name} has no field separator after the name"
             ));
         }
-        let mut seg = Segment::parse(&name, text, *lineno, &sep);
+        let mut seg = Segment::parse(&name, text, lineno, &sep);
         let entry = counts.iter_mut().find(|(n, _)| n == &name);
         seg.occurrence = if let Some((_, c)) = entry {
             *c += 1;

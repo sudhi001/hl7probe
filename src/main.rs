@@ -153,8 +153,8 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
     // which has to let you page back and forth, parses the whole batch; the
     // rest parse, use and drop one message at a time, so peak memory follows
     // the largest message rather than the size of the file.
-    let mut files: Vec<ScannedFile> = Vec::new();
-    for input in inputs {
+    let mut files: Vec<ScannedFile<'_>> = Vec::new();
+    for input in &inputs {
         files.push(scan_file(input, cli.message)?);
     }
 
@@ -197,7 +197,7 @@ struct Verdict {
 /// Writes every message of every file, parsing each one only when it is about
 /// to be written and dropping it straight after.
 fn write_files(
-    files: &[ScannedFile],
+    files: &[ScannedFile<'_>],
     o: &render::Options,
     quiet: bool,
     out: &mut Output,
@@ -271,7 +271,7 @@ fn write_files(
 /// One grep-friendly line per message: where it came from, what it is, and the
 /// verdict.
 fn quiet_line(
-    file: &ScannedFile,
+    file: &ScannedFile<'_>,
     msg: &Message,
     report: &Report,
     index: usize,
@@ -352,9 +352,9 @@ fn exit_code(worst: Option<Severity>, parse_failures: usize, strict: bool) -> Ex
 
 /// A file split into messages but not yet parsed. Keeping the raw lines rather
 /// than the parsed trees is what bounds memory on a large batch.
-struct ScannedFile {
+struct ScannedFile<'a> {
     label: String,
-    raws: Vec<parser::RawMessage>,
+    raws: Vec<parser::RawMessage<'a>>,
     notes: Vec<String>,
     /// Found by the scan, so they still print ahead of the messages.
     errors: Vec<String>,
@@ -365,20 +365,20 @@ struct ScannedFile {
     only: Option<usize>,
 }
 
-impl ScannedFile {
+impl<'a> ScannedFile<'a> {
     /// The raw messages this run reports on, which is all of them unless `-m`
     /// picked one.
-    fn selected(&self) -> impl Iterator<Item = &parser::RawMessage> {
+    fn selected(&self) -> impl Iterator<Item = &parser::RawMessage<'a>> {
         selected(&self.raws, self.only)
     }
 }
 
 /// The messages `-m` leaves in play, as a free function so the scan can use it
 /// before there is a `ScannedFile` to borrow.
-fn selected(
-    raws: &[parser::RawMessage],
+fn selected<'r, 'a>(
+    raws: &'r [parser::RawMessage<'a>],
     only: Option<usize>,
-) -> impl Iterator<Item = &parser::RawMessage> {
+) -> impl Iterator<Item = &'r parser::RawMessage<'a>> {
     raws.iter()
         .enumerate()
         .filter(move |(i, _)| only.is_none_or(|n| i + 1 == n))
@@ -388,10 +388,9 @@ fn selected(
 /// Splits a file into messages and checks which of them can be read, so parse
 /// errors still print ahead of the messages. The check reads only each
 /// message's MSH line, which is where both of the parser's failure modes live.
-fn scan_file(input: Input, only: Option<usize>) -> Result<ScannedFile, String> {
-    let Input { label, text } = input;
-    let (raws, notes) = parser::split_messages(&text);
-    drop(text);
+fn scan_file(input: &Input, only: Option<usize>) -> Result<ScannedFile<'_>, String> {
+    let label = input.label.clone();
+    let (raws, notes) = parser::split_messages(&input.text);
     if raws.is_empty() {
         return Err(format!(
             "{label}: no MSH segment found - is this an HL7 v2 message?"
@@ -534,7 +533,7 @@ fn parse_field_path(spec_str: &str) -> Result<FieldPath, String> {
 }
 
 fn query_field(
-    files: &[ScannedFile],
+    files: &[ScannedFile<'_>],
     path_str: &str,
     o: &render::Options,
 ) -> Result<ExitCode, String> {
@@ -595,7 +594,7 @@ fn query_field(
 /// `serde_json` emits map keys in alphabetical order and `status` sorts after
 /// `files`.
 struct Document<'a> {
-    files: &'a [ScannedFile],
+    files: &'a [ScannedFile<'a>],
     parse_failures: usize,
     worst: Cell<Option<Severity>>,
 }
@@ -636,7 +635,7 @@ impl Serialize for Files<'_> {
 
 struct FileEntry<'a> {
     doc: &'a Document<'a>,
-    file: &'a ScannedFile,
+    file: &'a ScannedFile<'a>,
 }
 
 impl Serialize for FileEntry<'_> {
@@ -658,7 +657,7 @@ impl Serialize for FileEntry<'_> {
 
 struct Messages<'a> {
     doc: &'a Document<'a>,
-    file: &'a ScannedFile,
+    file: &'a ScannedFile<'a>,
 }
 
 impl Serialize for Messages<'_> {
@@ -676,7 +675,7 @@ impl Serialize for Messages<'_> {
     }
 }
 
-fn emit_json(files: &[ScannedFile], strict: bool) -> Result<ExitCode, String> {
+fn emit_json(files: &[ScannedFile<'_>], strict: bool) -> Result<ExitCode, String> {
     let doc = Document {
         files,
         parse_failures: files.iter().map(|f| f.errors.len()).sum(),
