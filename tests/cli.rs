@@ -212,3 +212,67 @@ fn help_and_version_are_available() {
     assert!(help.contains("EXAMPLES"));
     assert!(stdout(&run(&["--version"])).contains(env!("CARGO_PKG_VERSION")));
 }
+
+/// A batch whose second message has an unusable MSH, so the parse error and
+/// the two readable messages have to coexist.
+fn batch_with_a_broken_message() -> String {
+    let good = std::fs::read_to_string("examples/adt_a01.hl7")
+        .unwrap()
+        .replace('\n', "\r");
+    format!("{good}MSHzzzz\rPID|1||X\r{good}")
+}
+
+#[test]
+fn parse_errors_print_before_the_messages_they_sit_among() {
+    let out = pipe(&[], &batch_with_a_broken_message());
+    let text = stdout(&out);
+    assert_eq!(code(&out), 2, "{text}");
+
+    let error_at = text
+        .find("parse error")
+        .expect("the bad message is reported");
+    let first_message_at = text
+        .find("message 1 of")
+        .expect("the good ones still render");
+    assert!(
+        error_at < first_message_at,
+        "the error belongs above the messages:\n{text}"
+    );
+}
+
+#[test]
+fn message_numbering_counts_only_the_readable_messages() {
+    let text = stdout(&pipe(&[], &batch_with_a_broken_message()));
+    assert!(text.contains("message 1 of 2"), "{text}");
+    assert!(text.contains("message 2 of 2"), "{text}");
+    // The unreadable one must not claim a number, or push the last one past
+    // the total.
+    assert!(!text.contains("message 3 of 2"), "{text}");
+    assert!(!text.contains("of 3"), "{text}");
+
+    let quiet = stdout(&pipe(&["-q"], &batch_with_a_broken_message()));
+    assert!(quiet.contains("#1"), "{quiet}");
+    assert!(quiet.contains("#2"), "{quiet}");
+    assert!(!quiet.contains("#3"), "{quiet}");
+}
+
+#[test]
+fn a_closed_pipe_is_not_an_error() {
+    // `hl7probe big.hl7 | head` closes stdout early; that ends the output
+    // rather than failing the run.
+    let batch = batch_with_a_broken_message().repeat(200);
+    let child = Command::new(BIN)
+        .args(["-"])
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = child;
+    let _ = child.stdin.as_mut().unwrap().write_all(batch.as_bytes());
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!err.contains("stdout:"), "{err}");
+}

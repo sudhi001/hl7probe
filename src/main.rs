@@ -9,8 +9,7 @@ mod tui;
 mod validate;
 mod view;
 
-use std::fmt::Write as _;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -129,9 +128,7 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
     let color = match cli.color {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
-        ColorChoice::Auto => {
-            std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-        }
+        ColorChoice::Auto => io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
     };
     let width = cli
         .width
@@ -149,117 +146,139 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
         raw: cli.raw,
     };
 
-    // Parse everything first so a bad message in a batch still reports cleanly.
-    let mut files: Vec<ParsedFile> = Vec::new();
-    for input in &inputs {
-        files.push(parse_file(input, cli.message)?);
-    }
-
-    if let Some(path) = &cli.field {
-        return query_field(&files, path, &options);
-    }
-    if cli.tui {
-        let all: Vec<(String, Message, Report)> = files
-            .into_iter()
-            .flat_map(|f| {
-                let label = f.label.clone();
-                f.messages
-                    .into_iter()
-                    .map(move |(m, r)| (label.clone(), m, r))
-            })
-            .collect();
-        if all.is_empty() {
-            return Err("no parsable messages to display".into());
+    // The viewer, the JSON document and a field query all need every message
+    // addressable at once, so those modes parse the batch up front.
+    if cli.tui || cli.json || cli.field.is_some() {
+        let mut files: Vec<ParsedFile> = Vec::new();
+        for input in &inputs {
+            files.push(parse_file(input, cli.message)?);
         }
-        tui::run(all).map_err(|e| e.to_string())?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    if cli.json {
+        if let Some(path) = &cli.field {
+            return query_field(&files, path, &options);
+        }
+        if cli.tui {
+            let all: Vec<(String, Message, Report)> = files
+                .into_iter()
+                .flat_map(|f| {
+                    let label = f.label.clone();
+                    f.messages
+                        .into_iter()
+                        .map(move |(m, r)| (label.clone(), m, r))
+                })
+                .collect();
+            if all.is_empty() {
+                return Err("no parsable messages to display".into());
+            }
+            tui::run(all).map_err(|e| e.to_string())?;
+            return Ok(ExitCode::SUCCESS);
+        }
         return emit_json(&files, cli.strict);
     }
 
-    let report = format_files(&files, &options, cli.quiet);
-    write_out(&report.text)?;
-    Ok(exit_code(report.worst, report.parse_failures, cli.strict))
+    // The text report does not: it parses, writes and drops one message before
+    // touching the next, so peak memory follows the largest message rather than
+    // the size of the batch.
+    let mut files: Vec<ScannedFile> = Vec::new();
+    for input in inputs {
+        files.push(scan_file(input, cli.message)?);
+    }
+    let mut out = Output::stdout();
+    let verdict = write_files(&files, &options, cli.quiet, &mut out)
+        .and_then(|v| out.finish().map(|()| v))
+        .map_err(|e| format!("stdout: {e}"))?;
+    Ok(exit_code(verdict.worst, verdict.parse_failures, cli.strict))
 }
 
-/// The printed report for a run, plus what it means for the exit status.
-struct TextReport {
-    text: String,
+/// What a run of the text report means for the exit status.
+struct Verdict {
     worst: Option<Severity>,
     parse_failures: usize,
 }
 
-/// Renders every message of every file into one buffer. Formatting into a
-/// `String` keeps the write, and its error handling, in a single place.
-fn format_files(files: &[ParsedFile], o: &render::Options, quiet: bool) -> TextReport {
-    let mut text = String::new();
+/// Writes every message of every file, parsing each one only when it is about
+/// to be written and dropping it straight after.
+fn write_files(
+    files: &[ScannedFile],
+    o: &render::Options,
+    quiet: bool,
+    out: &mut Output,
+) -> io::Result<Verdict> {
     let mut worst: Option<Severity> = None;
     let mut parse_failures = 0usize;
     let multi_file = files.len() > 1;
 
     for file in files {
         if multi_file && !quiet {
-            let _ = writeln!(
-                text,
+            writeln!(
+                out,
                 "\n{}",
                 o.paint.bold(&format!(
                     "{} {}",
                     render::RULE.to_string().repeat(2),
                     file.label
                 ))
-            );
+            )?;
         }
         if !quiet {
             for note in &file.notes {
-                let _ = writeln!(text, "{}", o.paint.yellow(&format!("note: {note}")));
+                writeln!(out, "{}", o.paint.yellow(&format!("note: {note}")))?;
             }
         }
+        // The scan already found these, which is what keeps them ahead of the
+        // messages the way a buffered report used to put them.
         for error in &file.errors {
             parse_failures += 1;
-            let _ = writeln!(text, "{}", o.paint.red(&format!("parse error: {error}")));
+            writeln!(out, "{}", o.paint.red(&format!("parse error: {error}")))?;
         }
-        for (index, (msg, report)) in file.messages.iter().enumerate() {
+        // Counted over the messages that parse, not over the raw ones, so an
+        // unreadable message in the middle does not shift the numbering.
+        let mut index = 0usize;
+        for raw in file.selected() {
+            let Ok(msg) = parser::parse_message(raw) else {
+                continue; // Already reported above.
+            };
+            let report = validate::validate(&msg);
             worst = worst.max(report.worst());
             if quiet {
-                let _ = writeln!(text, "{}", quiet_line(file, msg, report, index, o));
+                writeln!(out, "{}", quiet_line(file, &msg, &report, index, o))?;
+                index += 1;
                 continue;
             }
-            if file.messages.len() > 1 {
-                let _ = writeln!(
-                    text,
+            if file.message_count > 1 {
+                writeln!(
+                    out,
                     "\n{}",
                     o.paint.dim(&format!(
                         "message {} of {}   line {}",
                         index + 1,
-                        file.messages.len(),
+                        file.message_count,
                         msg.start_line
                     ))
-                );
+                )?;
             }
             for note in &msg.notes {
-                let _ = writeln!(text, "{}", o.paint.dim(&format!("note: {note}")));
+                writeln!(out, "{}", o.paint.dim(&format!("note: {note}")))?;
             }
-            text.push_str(&render::render_message(msg, report, o));
+            out.write_all(render::render_message(&msg, &report, o).as_bytes())?;
+            index += 1;
         }
     }
-    TextReport {
-        text,
+    Ok(Verdict {
         worst,
         parse_failures,
-    }
+    })
 }
 
 /// One grep-friendly line per message: where it came from, what it is, and the
 /// verdict.
 fn quiet_line(
-    file: &ParsedFile,
+    file: &ScannedFile,
     msg: &Message,
     report: &Report,
     index: usize,
     o: &render::Options,
 ) -> String {
-    let origin = if file.messages.len() > 1 {
+    let origin = if file.message_count > 1 {
         format!("{}#{}", file.label, index + 1)
     } else {
         file.label.clone()
@@ -272,17 +291,52 @@ fn quiet_line(
     )
 }
 
-/// Writes the report to stdout, treating a closed pipe (`hl7probe ... | head`)
-/// as a normal end rather than an error.
-fn write_out(text: &str) -> Result<(), String> {
-    let mut stdout = std::io::stdout().lock();
-    match stdout
-        .write_all(text.as_bytes())
-        .and_then(|()| stdout.flush())
-    {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(format!("stdout: {e}")),
+/// Buffered stdout that treats a closed pipe (`hl7probe ... | head`) as a
+/// normal end. Writing stops there, but the walk over the messages carries on
+/// so the exit status still reflects the whole input.
+struct Output {
+    inner: io::BufWriter<io::Stdout>,
+    closed: bool,
+}
+
+impl Output {
+    fn stdout() -> Self {
+        Self {
+            inner: io::BufWriter::new(io::stdout()),
+            closed: false,
+        }
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+}
+
+impl Write for Output {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.closed {
+            return Ok(buf.len());
+        }
+        match self.inner.write(buf) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                self.closed = true;
+                Ok(buf.len())
+            }
+            other => other,
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        match self.inner.flush() {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                self.closed = true;
+                Ok(())
+            }
+            other => other,
+        }
     }
 }
 
@@ -295,6 +349,81 @@ fn exit_code(worst: Option<Severity>, parse_failures: usize, strict: bool) -> Ex
         Some(Severity::Warning) if strict => ExitCode::from(1),
         _ => ExitCode::SUCCESS,
     }
+}
+
+/// A file split into messages but not yet parsed. Keeping the raw lines rather
+/// than the parsed trees is what bounds memory on a large batch.
+struct ScannedFile {
+    label: String,
+    raws: Vec<parser::RawMessage>,
+    notes: Vec<String>,
+    /// Found by the scan, so they still print ahead of the messages.
+    errors: Vec<String>,
+    /// How many of the selected messages parse, which decides whether the
+    /// output numbers them.
+    message_count: usize,
+    /// The single message `-m` asked for, if any.
+    only: Option<usize>,
+}
+
+impl ScannedFile {
+    /// The raw messages this run reports on, which is all of them unless `-m`
+    /// picked one.
+    fn selected(&self) -> impl Iterator<Item = &parser::RawMessage> {
+        selected(&self.raws, self.only)
+    }
+}
+
+/// The messages `-m` leaves in play, as a free function so the scan can use it
+/// before there is a `ScannedFile` to borrow.
+fn selected(
+    raws: &[parser::RawMessage],
+    only: Option<usize>,
+) -> impl Iterator<Item = &parser::RawMessage> {
+    raws.iter()
+        .enumerate()
+        .filter(move |(i, _)| only.is_none_or(|n| i + 1 == n))
+        .map(|(_, raw)| raw)
+}
+
+/// Splits a file into messages and checks which of them can be read, so parse
+/// errors still print ahead of the messages. The check reads only each
+/// message's MSH line, which is where both of the parser's failure modes live.
+fn scan_file(input: Input, only: Option<usize>) -> Result<ScannedFile, String> {
+    let Input { label, text } = input;
+    let (raws, notes) = parser::split_messages(&text);
+    drop(text);
+    if raws.is_empty() {
+        return Err(format!(
+            "{label}: no MSH segment found - is this an HL7 v2 message?"
+        ));
+    }
+    let mut errors = Vec::new();
+    let mut message_count = 0usize;
+    for raw in selected(&raws, only) {
+        match raw.separators() {
+            Ok(_) => message_count += 1,
+            Err(e) => errors.push(format!("{label}: {e}")),
+        }
+    }
+    if let Some(n) = only {
+        if message_count == 0 && errors.is_empty() {
+            return Err(format!(
+                "{}: message {} requested but the file holds {}",
+                label,
+                n,
+                raws.len()
+            ));
+        }
+    }
+    Ok(ScannedFile {
+        label,
+        raws,
+        notes,
+        errors,
+        message_count,
+        only,
+    })
 }
 
 struct ParsedFile {
@@ -348,7 +477,7 @@ fn parse_file(input: &Input, only: Option<usize>) -> Result<ParsedFile, String> 
 
 fn read_inputs(cli: &Cli) -> Result<Vec<Input>, String> {
     let use_stdin = cli.files.is_empty() || cli.files.iter().any(|f| f.as_os_str() == "-");
-    if cli.files.is_empty() && std::io::stdin().is_terminal() {
+    if cli.files.is_empty() && io::stdin().is_terminal() {
         return Err("no input given - pass a file or pipe a message in (try --help)".into());
     }
     let mut inputs = Vec::new();
@@ -360,7 +489,7 @@ fn read_inputs(cli: &Cli) -> Result<Vec<Input>, String> {
     }
     if use_stdin {
         let mut buf = Vec::new();
-        std::io::stdin()
+        io::stdin()
             .read_to_end(&mut buf)
             .map_err(|e| format!("stdin: {e}"))?;
         inputs.push(Input {

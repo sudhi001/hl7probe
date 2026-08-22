@@ -421,30 +421,52 @@ pub fn split_messages(raw: &str) -> (Vec<RawMessage>, Vec<String>) {
     (messages, warnings)
 }
 
+/// The three-character name a line starts with, when it is a usable segment
+/// name. Shared so the whole-message check and the segment loop cannot drift.
+fn segment_name(text: &str) -> Option<String> {
+    let name: String = text.chars().take(3).collect();
+    let usable = name.chars().count() == 3
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && name.starts_with(|c: char| c.is_ascii_uppercase());
+    usable.then_some(name)
+}
+
+impl RawMessage {
+    /// The delimiters this message declares, or the reason it cannot be read.
+    /// Both of `parse_message`'s failure modes are settled by the first line,
+    /// so a batch can be checked for unreadable messages without building a
+    /// single tree.
+    pub fn separators(&self) -> Result<Separators, ParseError> {
+        let (lineno, text) = &self.lines[0];
+        let sep = Separators::from_msh(text).map_err(|e| ParseError::new(*lineno, e.message))?;
+        if segment_name(text).as_deref() != Some("MSH") {
+            return Err(ParseError::new(
+                *lineno,
+                "message does not begin with a parsable MSH segment",
+            ));
+        }
+        Ok(sep)
+    }
+}
+
 pub fn parse_message(raw: &RawMessage) -> Result<Message, ParseError> {
-    let (first_line, first_text) = &raw.lines[0];
-    let sep =
-        Separators::from_msh(first_text).map_err(|e| ParseError::new(*first_line, e.message))?;
+    let sep = raw.separators()?;
 
     let mut segments: Vec<Segment> = Vec::new();
     let mut notes = raw.notes.clone();
     let mut counts: Vec<(String, usize)> = Vec::new();
 
     for (lineno, text) in &raw.lines {
-        let name: String = text.chars().take(3).collect();
-        let valid_name = name.chars().count() == 3
-            && name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-            && name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-        if !valid_name {
+        let Some(name) = segment_name(text) else {
             notes.push(format!(
                 "line {}: skipped unrecognisable segment starting {:?}",
                 lineno,
                 text.chars().take(8).collect::<String>()
             ));
             continue;
-        }
+        };
         if text.chars().nth(3) != Some(sep.field) {
             notes.push(format!(
                 "line {lineno}: segment {name} has no field separator after the name"
@@ -462,12 +484,6 @@ pub fn parse_message(raw: &RawMessage) -> Result<Message, ParseError> {
         segments.push(seg);
     }
 
-    if segments.is_empty() || segments[0].name != "MSH" {
-        return Err(ParseError::new(
-            *first_line,
-            "message does not begin with a parsable MSH segment",
-        ));
-    }
     Ok(Message {
         sep,
         segments,

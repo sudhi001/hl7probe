@@ -9,6 +9,16 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Changed
 
+- The text report streams. Messages are parsed, written and dropped one at a
+  time instead of the whole batch being held in memory, so peak memory follows
+  the largest message rather than the size of the file. A 26 MB batch of 50,000
+  messages drops from 2.4 GB to 129 MB, and runs faster for it: `-q` over that
+  file goes from 2.1s to 1.2s. Output is unchanged, including the placement of
+  parse errors above the messages they sit among - a scan pass finds the
+  unreadable messages first, reading only each MSH line.
+- `parse_message` decides both of its failure modes on a message's first line
+  now rather than after building the segment list, which is what makes that
+  scan cheap. The check the two share lives in one place so they cannot drift.
 - The lint policy moved into a `[lints]` table in `Cargo.toml`, so a local
   `cargo clippy` enforces exactly what CI does: `clippy::pedantic`, plus
   `unsafe_code = "forbid"` and `clippy::unwrap_used` for the code that handles
@@ -25,6 +35,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - Unit tests for the exit-status contract, field-path parsing, the latin-1
   input fallback and file labelling.
+- Tests covering a batch with an unreadable message in the middle: the parse
+  error still prints above the readable messages, the numbering still counts
+  only the messages that parse, and a closed pipe still ends the run quietly.
 - CI builds and tests on the declared minimum Rust version, builds with
   `--locked`, and fails on rustdoc warnings.
 
